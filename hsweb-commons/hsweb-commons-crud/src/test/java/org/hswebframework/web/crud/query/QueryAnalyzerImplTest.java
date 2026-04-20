@@ -6,11 +6,13 @@ import org.hswebframework.ezorm.rdb.operator.DatabaseOperator;
 import org.hswebframework.web.api.crud.entity.QueryParamEntity;
 import org.hswebframework.web.crud.TestApplication;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -20,6 +22,18 @@ import static org.junit.jupiter.api.Assertions.*;
 public class QueryAnalyzerImplTest {
     @Autowired
     private DatabaseOperator database;
+
+    @Before
+    public void before() {
+        Flux.concat(
+                database.sql().reactive().update("delete from test_tree_sort"),
+                database.sql().reactive().update("delete from s_test_event"),
+                database.sql().reactive().update("delete from s_test")
+            )
+            .then()
+            .as(StepVerifier::create)
+            .verifyComplete();
+    }
 
     /**
      * 执行SQL并验证是否有错误

@@ -3,12 +3,11 @@ package org.hswebframework.web.crud.query;
 import lombok.Getter;
 import lombok.SneakyThrows;
 import net.sf.jsqlparser.expression.*;
-import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
+import net.sf.jsqlparser.statement.piped.FromQuery;
 import net.sf.jsqlparser.statement.select.*;
-import net.sf.jsqlparser.statement.values.ValuesStatement;
 import org.apache.commons.collections4.CollectionUtils;
 import org.hswebframework.ezorm.core.meta.FeatureSupportedMetadata;
 import org.hswebframework.ezorm.core.param.Sort;
@@ -24,28 +23,50 @@ import org.springframework.util.StringUtils;
 
 import java.util.*;
 
-import static net.sf.jsqlparser.statement.select.PlainSelect.getFormatedList;
+import static net.sf.jsqlparser.statement.select.Select.getFormattedList;
 import static org.hswebframework.ezorm.rdb.operator.builder.fragments.TermFragmentBuilder.createFeatureId;
 
 
-class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVisitor, QueryAnalyzer {
+class QueryAnalyzerImpl implements FromItemVisitor<Void>, SelectItemVisitor<Void>, SelectVisitor<Void>, QueryAnalyzer {
+
+    private static final String UNSUPPORTED_DISTANCE_OPERATOR = "<=>";
+
+    private static final List<String> PARSER_OPERATOR_PLACEHOLDERS = Arrays.asList("!~*", "~*", "@@", "@>", "<@", "&&", "~");
 
     private final DatabaseOperator database;
 
     private String sql;
 
-    private final SelectBody parsed;
+    private final net.sf.jsqlparser.statement.select.Select parsed;
+
+    private String parserOperatorPlaceholder;
 
     private QueryAnalyzer.Select select;
 
     private final Map<String, QueryAnalyzer.Join> joins = new LinkedHashMap<>();
 
-    private final List<WithItem> withItems = new ArrayList<>();
+    private final List<WithItem<?>> withItems = new ArrayList<>();
     private QueryRefactor injector;
 
     private volatile Map<String, Column> columnMappings;
 
     private final Map<String, TableOrViewMetadata> virtualTable = new HashMap<>();
+
+    private static <T> T acceptFromItem(FromItem fromItem, FromItemVisitor<T> visitor) {
+        return fromItem.accept(visitor, null);
+    }
+
+    private static <T> T acceptSelect(net.sf.jsqlparser.statement.select.Select select, SelectVisitor<T> visitor) {
+        return select.accept(visitor, null);
+    }
+
+    private static <T> T acceptWithItem(WithItem<?> withItem, SelectVisitor<T> visitor) {
+        return withItem.accept(visitor, null);
+    }
+
+    private static <T> T acceptSelectItem(SelectItem<?> selectItem, SelectItemVisitor<T> visitor) {
+        return selectItem.accept(visitor, null);
+    }
 
     @Override
     public String originalSql() {
@@ -86,6 +107,11 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
     QueryAnalyzerImpl(DatabaseOperator database, String sql) {
         this(database, parse(sql));
         this.sql = sql;
+    }
+
+    private QueryAnalyzerImpl(DatabaseOperator database, ParsedSelect parsed) {
+        this(database, parsed.select);
+        this.parserOperatorPlaceholder = parsed.operatorPlaceholder;
     }
 
 
@@ -178,48 +204,69 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
     }
 
     @SneakyThrows
-    private static net.sf.jsqlparser.statement.select.Select parse(String sql) {
-        return ((net.sf.jsqlparser.statement.select.Select) CCJSqlParserUtil.parse(sql));
+    private static ParsedSelect parse(String sql) {
+        String operatorPlaceholder = null;
+        String sqlToParse = sql;
+        if (sql.contains(UNSUPPORTED_DISTANCE_OPERATOR)) {
+            operatorPlaceholder = PARSER_OPERATOR_PLACEHOLDERS
+                .stream()
+                .filter(candidate -> !sql.contains(candidate))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Unable to parse sql with operator " + UNSUPPORTED_DISTANCE_OPERATOR));
+            sqlToParse = sql.replace(UNSUPPORTED_DISTANCE_OPERATOR, operatorPlaceholder);
+        }
+        return new ParsedSelect(
+            ((net.sf.jsqlparser.statement.select.Select) CCJSqlParserUtil.parse(sqlToParse)),
+            operatorPlaceholder
+        );
     }
 
-    QueryAnalyzerImpl(DatabaseOperator database, SelectBody selectBody, QueryAnalyzerImpl parent) {
+    private static net.sf.jsqlparser.statement.select.Select unwrapParenthesedSelect(net.sf.jsqlparser.statement.select.Select select) {
+        while (select instanceof ParenthesedSelect parenthesedSelect) {
+            select = parenthesedSelect.getSelect();
+        }
+        return select;
+    }
+
+    private String restoreParserPlaceholders(Object sql) {
+        return sql == null ? null : restoreParserPlaceholders(sql.toString());
+    }
+
+    private String restoreParserPlaceholders(String sql) {
+        if (parserOperatorPlaceholder == null || sql == null) {
+            return sql;
+        }
+        return sql.replace(parserOperatorPlaceholder, UNSUPPORTED_DISTANCE_OPERATOR);
+    }
+
+    QueryAnalyzerImpl(DatabaseOperator database, net.sf.jsqlparser.statement.select.Select selectBody, QueryAnalyzerImpl parent) {
         this.database = database;
         this.virtualTable.putAll(parent.virtualTable);
         if (null != selectBody) {
             this.parsed = selectBody;
-            selectBody.accept(this);
+            if (CollectionUtils.isNotEmpty(selectBody.getWithItemsList())) {
+                for (WithItem<?> withItem : selectBody.getWithItemsList()) {
+                    acceptWithItem(withItem, this);
+                }
+            }
+            acceptSelect(selectBody, this);
         } else {
             this.parsed = null;
         }
     }
 
-    QueryAnalyzerImpl(DatabaseOperator database, SubSelect select, QueryAnalyzerImpl parent) {
-        this.parsed = select.getSelectBody();
-        this.database = database;
-        this.virtualTable.putAll(parent.virtualTable);
-        //with ...
-        if (CollectionUtils.isNotEmpty(select.getWithItemsList())) {
-            for (WithItem withItem : select.getWithItemsList()) {
-                withItem.accept(this);
-            }
-        }
-        if (this.parsed != null) {
-            this.parsed.accept(this);
-        }
-    }
-
     QueryAnalyzerImpl(DatabaseOperator database, net.sf.jsqlparser.statement.select.Select select) {
-        this.parsed = select.getSelectBody();
+        this.parsed = select;
         this.database = database;
         //with ...
         if (CollectionUtils.isNotEmpty(select.getWithItemsList())) {
-            for (WithItem withItem : select.getWithItemsList()) {
-                withItem.accept(this);
+            for (WithItem<?> withItem : select.getWithItemsList()) {
+                acceptWithItem(withItem, this);
             }
         }
 
         if (this.parsed != null) {
-            this.parsed.accept(this);
+            acceptSelect(this.parsed, this);
         }
     }
 
@@ -239,7 +286,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
     }
 
     @Override
-    public void visit(net.sf.jsqlparser.schema.Table tableName) {
+    public <S> Void visit(net.sf.jsqlparser.schema.Table tableName, S context) {
         String schema = parsePlainName(tableName.getSchemaName());
 
         String name = parsePlainName(tableName.getName());
@@ -273,17 +320,28 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         );
 
         select = new QueryAnalyzer.Select(new ArrayList<>(), table);
-
+        return null;
     }
 
     // select * from ( select a,b,c from table ) t
     @Override
-    public void visit(SubSelect subSelect) {
-        visit(subSelect, subSelect.getAlias() == null ? null : subSelect.getAlias().getName());
+    public <S> Void visit(ParenthesedSelect select, S context) {
+        visit(select, select.getAlias() == null ? null : select.getAlias().getName());
+        return null;
     }
 
-    public void visit(SubSelect subSelect, String alias) {
-        SelectBody body = subSelect.getSelectBody();
+    @Override
+    public void visit(ParenthesedSelect select) {
+        visit(select, (Object) null);
+    }
+
+    private void visit(ParenthesedSelect subSelect, String alias) {
+        net.sf.jsqlparser.statement.select.Select body = subSelect.getSelect();
+        if (body instanceof Values values) {
+            visitValues(values, subSelect.getAlias() == null ? values.getAlias() : subSelect.getAlias());
+            return;
+        }
+
         QueryAnalyzerImpl sub = new QueryAnalyzerImpl(database, body, this);
         Map<String, Column> columnMap = new LinkedHashMap<>();
         for (Column column : sub.select.getColumnList()) {
@@ -327,36 +385,28 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
     }
 
     @Override
-    public void visit(SubJoin subjoin) {
-        for (net.sf.jsqlparser.statement.select.Join join : subjoin.getJoinList()) {
-            join.getRightItem().accept(this);
-        }
+    public <S> Void visit(LateralSubSelect lateralSubSelect, S context) {
+        this.visit((ParenthesedSelect) lateralSubSelect,
+                   lateralSubSelect.getAlias() == null ? null : lateralSubSelect.getAlias().getName());
+        return null;
     }
 
     @Override
     public void visit(LateralSubSelect lateralSubSelect) {
-        this.visit(lateralSubSelect.getSubSelect(),
-                   lateralSubSelect.getAlias() == null ? null : lateralSubSelect.getAlias().getName());
+        visit(lateralSubSelect, (Object) null);
     }
 
-    @Override
-    public void visit(ValuesList valuesList) {
-        if (valuesList.getAlias() == null) {
-            throw new IllegalArgumentException("valuesList[" + valuesList + "] must have alias");
+    private void visitValues(Values values, Alias alias) {
+        if (alias == null) {
+            throw new IllegalArgumentException("values[" + values + "] must have alias");
         }
-        String name = parsePlainName(valuesList.getAlias().getName());
+        String name = parsePlainName(alias.getName());
         FakeTable view = new FakeTable();
         view.setSchema(database.getMetadata().getCurrentSchema());
-        if (valuesList.getColumnNames() != null) {
-            //获取会自动创建列
-            for (String columnName : valuesList.getColumnNames()) {
-                RDBColumnMetadata ignore = view.getColumn(parsePlainName(columnName)).orElse(null);
-            }
-        }
 
-        if (valuesList.getAlias().getAliasColumns() != null) {
-            for (Alias.AliasColumn alias : valuesList.getAlias().getAliasColumns()) {
-                RDBColumnMetadata ignore = view.getColumn(parsePlainName(alias.name)).orElse(null);
+        if (alias.getAliasColumns() != null) {
+            for (Alias.AliasColumn aliasColumn : alias.getAliasColumns()) {
+                RDBColumnMetadata ignore = view.getColumn(parsePlainName(aliasColumn.name)).orElse(null);
             }
         }
 
@@ -371,7 +421,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
     }
 
     @Override
-    public void visit(TableFunction tableFunction) {
+    public <S> Void visit(TableFunction tableFunction, S context) {
         if (tableFunction.getAlias() == null) {
             throw new IllegalArgumentException("table function[" + tableFunction + "] must have alias");
         }
@@ -386,19 +436,42 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         Table table = new Table(name, view);
 
         select = new QueryAnalyzer.Select(new ArrayList<>(), table);
-
+        return null;
     }
 
     @Override
-    public void visit(ParenthesisFromItem aThis) {
-        aThis.getFromItem().accept(this);
+    public <S> Void visit(ParenthesedFromItem aThis, S context) {
+        if (aThis.getFromItem() instanceof Values values) {
+            visitValues(values, aThis.getAlias());
+        } else {
+            acceptFromItem(aThis.getFromItem(), this);
+        }
+        if (CollectionUtils.isNotEmpty(aThis.getJoins())) {
+            for (net.sf.jsqlparser.statement.select.Join join : aThis.getJoins()) {
+                FromItem fromItem = join.getRightItem();
+                QueryAnalyzerImpl joinAn = new QueryAnalyzerImpl(database, (net.sf.jsqlparser.statement.select.Select) null, this);
+                acceptFromItem(fromItem, joinAn);
+
+                Join.Type type;
+                if (join.isLeft()) {
+                    type = Join.Type.left;
+                } else if (join.isRight()) {
+                    type = Join.Type.right;
+                } else if (join.isInner()) {
+                    type = Join.Type.inner;
+                } else {
+                    type = null;
+                }
+                joins.put(joinAn.select.table.alias, new Join(joinAn.select.table.alias, type, joinAn.select.table));
+            }
+        }
         String alias = parsePlainName(aThis.getAlias() == null ? null : aThis.getAlias().getName());
         if (alias != null) {
             this.select = select.newSelectAlias(alias);
         }
+        return null;
     }
 
-    @Override
     public void visit(AllColumns allColumns) {
         putSelectColumns(select.table, select.columnList);
 
@@ -435,7 +508,6 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         }
     }
 
-    @Override
     public void visit(AllTableColumns allTableColumns) {
         net.sf.jsqlparser.schema.Table table = allTableColumns.getTable();
 
@@ -476,9 +548,9 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
 
     static class ExpressionColumn extends Column {
 
-        private final SelectItem expr;
+        private final SelectItem<?> expr;
 
-        public ExpressionColumn(String alias, String owner, RDBColumnMetadata metadata, SelectItem expr) {
+        public ExpressionColumn(String alias, String owner, RDBColumnMetadata metadata, SelectItem<?> expr) {
             super(alias, alias, owner, metadata);
             this.expr = expr;
         }
@@ -501,8 +573,17 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
     }
 
     @Override
-    public void visit(SelectExpressionItem selectExpressionItem) {
+    public <S> Void visit(SelectItem<? extends Expression> selectExpressionItem, S context) {
         Expression expr = selectExpressionItem.getExpression();
+        if (expr instanceof AllColumns allColumns) {
+            visit(allColumns);
+            return null;
+        }
+        if (expr instanceof AllTableColumns allTableColumns) {
+            visit(allTableColumns);
+            return null;
+        }
+
         Alias alias = selectExpressionItem.getAlias();
 
         if (!(expr instanceof net.sf.jsqlparser.schema.Column column)) {
@@ -510,7 +591,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             refactorAlias(alias);
             select.columnList.add(new ExpressionColumn(aliasName, null, null, selectExpressionItem));
 
-            return;
+            return null;
         }
 
         String columnName = parsePlainName(column.getColumnName());
@@ -530,7 +611,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                 if (null != c) {
                     if (c.metadata == null) {
                         select.columnList.add(new QueryAnalyzer.Column(c.getName(), aliasName, table.alias, null));
-                        return;
+                        return null;
                     }
                     metadata = c.metadata;
                 }
@@ -542,19 +623,18 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         }
 
         select.columnList.add(new QueryAnalyzer.Column(metadata.getRealName(), aliasName, table.alias, metadata));
-
-
+        return null;
     }
 
     @Override
-    public void visit(PlainSelect select) {
+    public <S> Void visit(PlainSelect select, S context) {
 
         FromItem from = select.getFromItem();
 
         if (from == null) {
             throw new IllegalArgumentException("select can not be without 'from'");
         }
-        from.accept(this);
+        acceptFromItem(from, this);
 
 
         List<net.sf.jsqlparser.statement.select.Join> joinList = select.getJoins();
@@ -562,8 +642,8 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         if (joinList != null) {
             for (net.sf.jsqlparser.statement.select.Join join : joinList) {
                 FromItem fromItem = join.getRightItem();
-                QueryAnalyzerImpl joinAn = new QueryAnalyzerImpl(database, (SelectBody) null, this);
-                fromItem.accept(joinAn);
+                QueryAnalyzerImpl joinAn = new QueryAnalyzerImpl(database, (net.sf.jsqlparser.statement.select.Select) null, this);
+                acceptFromItem(fromItem, joinAn);
 
                 Join.Type type;
                 if (join.isLeft()) {
@@ -579,34 +659,44 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             }
         }
 
-        for (SelectItem selectItem : select.getSelectItems()) {
-            selectItem.accept(this);
+        for (SelectItem<?> selectItem : select.getSelectItems()) {
+            acceptSelectItem(selectItem, this);
         }
+        return null;
+    }
+
+    @Override
+    public void visit(PlainSelect select) {
+        visit(select, (Object) null);
+    }
+
+    @Override
+    public <S> Void visit(SetOperationList setOpList, S context) {
+        //union
+
+        for (net.sf.jsqlparser.statement.select.Select body : setOpList.getSelects()) {
+            acceptSelect(body, this);
+            // break;
+        }
+        return null;
     }
 
     @Override
     public void visit(SetOperationList setOpList) {
-        //union
-
-        for (SelectBody body : setOpList.getSelects()) {
-            body.accept(this);
-            // break;
-        }
-
-
+        visit(setOpList, (Object) null);
     }
 
     @Override
-    public void visit(WithItem withItem) {
+    public <S> Void visit(WithItem<?> withItem, S context) {
         withItems.add(withItem);
 
-        String name = withItem.getName();
+        String name = withItem.getAlias().getName();
         RDBViewMetadata view = new RDBViewMetadata();
         view.setName(name);
         view.setSchema(database.getMetadata().getCurrentSchema());
         virtualTable.put(name, view);
-        if (withItem.getSubSelect() != null) {
-            QueryAnalyzerImpl analyzer = new QueryAnalyzerImpl(database, withItem.getSubSelect(), this);
+        if (withItem.getSelect() != null) {
+            QueryAnalyzerImpl analyzer = new QueryAnalyzerImpl(database, unwrapParenthesedSelect(withItem.getSelect()), this);
             for (Column column : analyzer.select.getColumnList()) {
                 RDBColumnMetadata metadata;
                 if (column.getMetadata() == null) {
@@ -619,18 +709,39 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                 view.addColumn(metadata);
             }
         }
+        return null;
     }
 
     @Override
-    public void visit(ValuesStatement aThis) {
+    public <S> Void visit(Values values, S context) {
+        visitValues(values, values.getAlias());
+        return null;
+    }
 
+    @Override
+    public void visit(Values values) {
+        visit(values, (Object) null);
+    }
+
+    @Override
+    public <S> Void visit(TableStatement tableStatement, S context) {
+        return null;
+    }
+
+    @Override
+    public void visit(TableStatement tableStatement) {
+    }
+
+    @Override
+    public <S> Void visit(FromQuery fromQuery, S context) {
+        throw new UnsupportedOperationException("Pipe query syntax is not supported");
     }
 
     private void initInjector() {
         SimpleQueryRefactor injector = new SimpleQueryRefactor();
-        parsed.accept(injector);
-        for (WithItem withItem : withItems) {
-            withItem.accept(injector);
+        acceptSelect(parsed, injector);
+        for (WithItem<?> withItem : withItems) {
+            acceptWithItem(withItem, injector);
         }
         this.injector = injector;
     }
@@ -708,7 +819,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
 
     static QueryAnalyzerTermsFragmentBuilder TERMS_BUILDER = new QueryAnalyzerTermsFragmentBuilder();
 
-    class SimpleQueryRefactor implements QueryRefactor, SelectVisitor {
+    class SimpleQueryRefactor implements QueryRefactor, SelectVisitor<Void> {
         private String prefix = "";
         private String from;
 
@@ -748,7 +859,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                     columns.append(",");
                 }
                 if (column instanceof ExpressionColumn) {
-                    columns.append(((ExpressionColumn) column).expr);
+                    columns.append(restoreParserPlaceholders(((ExpressionColumn) column).expr));
                     fastCount = false;
                     continue;
                 }
@@ -762,7 +873,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         }
 
         @Override
-        public void visit(PlainSelect plainSelect) {
+        public <S> Void visit(PlainSelect plainSelect, S context) {
 
             StringBuilder from = new StringBuilder();
             StringBuilder columns = new StringBuilder();
@@ -779,8 +890,8 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
 
             if (plainSelect.getSelectItems() != null) {
                 PrepareStatementVisitor visitor = new PrepareStatementVisitor();
-                for (SelectItem selectItem : plainSelect.getSelectItems()) {
-                    selectItem.accept(visitor);
+                for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
+                    acceptSelectItem(selectItem, visitor);
                 }
                 prefixParameters += visitor.parameterSize;
             }
@@ -788,9 +899,9 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             if (plainSelect.getFromItem() != null) {
                 from.append("FROM ");
 
-                from.append(plainSelect.getFromItem());
+                from.append(restoreParserPlaceholders(plainSelect.getFromItem()));
                 PrepareStatementVisitor visitor = new PrepareStatementVisitor();
-                plainSelect.getFromItem().accept(visitor);
+                acceptFromItem(plainSelect.getFromItem(), visitor);
                 prefixParameters += visitor.parameterSize;
             }
 
@@ -798,12 +909,12 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                 PrepareStatementVisitor visitor = new PrepareStatementVisitor();
                 for (net.sf.jsqlparser.statement.select.Join join : plainSelect.getJoins()) {
                     if (join.isSimple()) {
-                        from.append(", ").append(join);
+                        from.append(", ").append(restoreParserPlaceholders(join));
                     } else {
-                        from.append(" ").append(join);
+                        from.append(" ").append(restoreParserPlaceholders(join));
                     }
                     if (null != join.getRightItem()) {
-                        join.getRightItem().accept(visitor);
+                        acceptFromItem(join.getRightItem(), visitor);
                     }
                     if (null != join.getOnExpressions()) {
                         for (Expression onExpression : join.getOnExpressions()) {
@@ -818,7 +929,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                 PrepareStatementVisitor visitor = new PrepareStatementVisitor();
                 plainSelect.getWhere().accept(visitor);
                 prefixParameters += visitor.parameterSize;
-                where = plainSelect.getWhere().toString();
+                where = restoreParserPlaceholders(plainSelect.getWhere());
             }
 
             if (plainSelect.getOrderByElements() != null) {
@@ -827,12 +938,12 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                     orderByElement.getExpression().accept(visitor);
                 }
                 suffixParameters = visitor.parameterSize;
-                orderBy = getFormatedList(plainSelect.getOrderByElements(), "");
+                orderBy = restoreParserPlaceholders(getFormattedList(plainSelect.getOrderByElements(), ""));
             }
 
             if (plainSelect.getGroupBy() != null) {
                 fastCount = false;
-                suffix.append(' ').append(plainSelect.getGroupBy());
+                suffix.append(' ').append(restoreParserPlaceholders(plainSelect.getGroupBy()));
 
                 PrepareStatementVisitor visitor = new PrepareStatementVisitor();
                 plainSelect.getGroupBy().getGroupByExpressionList().accept(visitor);
@@ -844,48 +955,73 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                 PrepareStatementVisitor visitor = new PrepareStatementVisitor();
                 plainSelect.getHaving().accept(visitor);
                 suffixParameters = visitor.parameterSize;
-                suffix.append(" HAVING ").append(plainSelect.getHaving());
+                suffix.append(" HAVING ").append(restoreParserPlaceholders(plainSelect.getHaving()));
             }
 
             this.columns = columns.toString();
             this.from = from.toString();
             this.suffix = suffix.toString();
-
+            return null;
         }
 
         @Override
-        public void visit(SetOperationList setOpList) {
+        public <S> Void visit(SetOperationList setOpList, S context) {
             StringBuilder from = new StringBuilder();
             StringBuilder columns = new StringBuilder();
 
             initColumns(columns);
 
             from.append("FROM (");
-            from.append(setOpList);
+            from.append(restoreParserPlaceholders(setOpList));
             from.append(") ");
             from.append(select.table.alias);
 
             this.from = from.toString();
             this.columns = columns.toString();
             this.suffix = "";
-
+            return null;
         }
 
         @Override
-        public void visit(WithItem withItem) {
+        public <S> Void visit(ParenthesedSelect select, S context) {
+            if (select.getSelect() != null) {
+                acceptSelect(select.getSelect(), this);
+            }
+            return null;
+        }
+
+        @Override
+        public <S> Void visit(WithItem<?> withItem, S context) {
             if (!StringUtils.hasText(prefix)) {
                 prefix += "WITH ";
             }
-            prefix += withItem;
+            prefix += restoreParserPlaceholders(withItem);
             PrepareStatementVisitor visitor = new PrepareStatementVisitor();
-            withItem.accept(visitor);
+            acceptWithItem(withItem, visitor);
             prefixParameters += visitor.parameterSize;
+            return null;
         }
 
         @Override
-        public void visit(ValuesStatement aThis) {
+        public <S> Void visit(Values values, S context) {
             PrepareStatementVisitor visitor = new PrepareStatementVisitor();
-            aThis.accept(visitor);
+            values.getExpressions().accept(visitor);
+            return null;
+        }
+
+        @Override
+        public <S> Void visit(LateralSubSelect lateralSubSelect, S context) {
+            return visit((ParenthesedSelect) lateralSubSelect, context);
+        }
+
+        @Override
+        public <S> Void visit(TableStatement tableStatement, S context) {
+            return null;
+        }
+
+        @Override
+        public <S> Void visit(FromQuery fromQuery, S context) {
+            throw new UnsupportedOperationException("Pipe query syntax is not supported");
         }
 
         public Object[] getPrefixParameters(Object... args) {
@@ -1074,7 +1210,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
 
 
     @Getter
-    static class PrepareStatementVisitor extends ExpressionVisitorAdapter implements FromItemVisitor, SelectVisitor {
+    static class PrepareStatementVisitor extends ExpressionVisitorAdapter<Void> implements FromItemVisitor<Void>, SelectVisitor<Void> {
         private int parameterSize;
 
         public PrepareStatementVisitor() {
@@ -1082,73 +1218,80 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         }
 
         @Override
-        public void visit(JdbcParameter parameter) {
+        public <S> Void visit(JdbcParameter parameter, S context) {
             parameterSize++;
-            super.visit(parameter);
+            return super.visit(parameter, context);
         }
 
         @Override
-        public void visit(net.sf.jsqlparser.schema.Table tableName) {
-
+        public <S> Void visit(net.sf.jsqlparser.schema.Table tableName, S context) {
+            return null;
         }
 
         @Override
-        public void visit(SubJoin subjoin) {
-            if (subjoin.getLeft() != null) {
-                subjoin.getLeft().accept(this);
+        public <S> Void visit(ParenthesedFromItem fromItem, S context) {
+            if (fromItem.getFromItem() != null) {
+                acceptFromItem(fromItem.getFromItem(), this);
             }
-            if (CollectionUtils.isNotEmpty(subjoin.getJoinList())) {
-                for (net.sf.jsqlparser.statement.select.Join join : subjoin.getJoinList()) {
+            if (CollectionUtils.isNotEmpty(fromItem.getJoins())) {
+                for (net.sf.jsqlparser.statement.select.Join join : fromItem.getJoins()) {
                     if (join.getRightItem() != null) {
-                        join.getRightItem().accept(this);
+                        acceptFromItem(join.getRightItem(), this);
                     }
                     if (join.getOnExpressions() != null) {
                         join.getOnExpressions().forEach(expr -> expr.accept(this));
                     }
                 }
             }
+            return null;
+        }
+
+        @Override
+        public <S> Void visit(LateralSubSelect lateralSubSelect, S context) {
+            if (lateralSubSelect.getSelect() != null) {
+                acceptSelect(lateralSubSelect.getSelect(), this);
+            }
+            return null;
         }
 
         @Override
         public void visit(LateralSubSelect lateralSubSelect) {
-            if (lateralSubSelect.getSubSelect() != null) {
-                lateralSubSelect.getSubSelect().accept((ExpressionVisitor) this);
-            }
+            visit(lateralSubSelect, (Object) null);
         }
 
         @Override
-        public void visit(ValuesList valuesList) {
-            if (valuesList.getMultiExpressionList() != null) {
-                for (ExpressionList expressionList : valuesList.getMultiExpressionList().getExpressionLists()) {
-                    expressionList.getExpressions().forEach(expr -> expr.accept(this));
-                }
+        public <S> Void visit(Values values, S context) {
+            if (values.getExpressions() != null) {
+                values.getExpressions().accept(this);
             }
+            return null;
         }
 
         @Override
-        public void visit(TableFunction tableFunction) {
+        public void visit(Values values) {
+            visit(values, (Object) null);
+        }
+
+        @Override
+        public <S> Void visit(TableFunction tableFunction, S context) {
             tableFunction.getFunction().accept(this);
+            return null;
         }
 
         @Override
-        public void visit(ParenthesisFromItem aThis) {
-            aThis.getFromItem().accept(this);
-        }
-
-        @Override
-        public void visit(PlainSelect plainSelect) {
-            plainSelect.getFromItem().accept(this);
+        public <S> Void visit(PlainSelect plainSelect, S context) {
+            acceptFromItem(plainSelect.getFromItem(), this);
             if (plainSelect.getJoins() != null) {
                 for (net.sf.jsqlparser.statement.select.Join join : plainSelect.getJoins()) {
-                    join.getRightItem().accept(this);
+                    acceptFromItem(join.getRightItem(), this);
                     if (join.getOnExpressions() != null) {
                         join.getOnExpressions().forEach(expr -> expr.accept(this));
                     }
                 }
             }
             if (plainSelect.getSelectItems() != null) {
-                for (SelectItem selectItem : plainSelect.getSelectItems()) {
-                    selectItem.accept(this);
+                for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
+                    acceptSelectItem(selectItem, this);
                 }
             }
             if (plainSelect.getWhere() != null) {
@@ -1159,7 +1302,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             }
 
             if (plainSelect.getDistinct() != null && plainSelect.getDistinct().getOnSelectItems() != null) {
-                plainSelect.getDistinct().getOnSelectItems().forEach(expr -> expr.accept(this));
+                plainSelect.getDistinct().getOnSelectItems().forEach(item -> item.getExpression().accept(this));
             }
 
             if (plainSelect.getOrderByElements() != null) {
@@ -1169,17 +1312,23 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             }
 
             if (plainSelect.getGroupBy() != null) {
-                for (Expression expression : plainSelect.getGroupBy().getGroupByExpressionList().getExpressions()) {
-                    expression.accept(this);
+                for (Object expression : plainSelect.getGroupBy().getGroupByExpressionList()) {
+                    ((Expression) expression).accept(this);
                 }
             }
+            return null;
         }
 
         @Override
-        public void visit(SetOperationList setOpList) {
+        public void visit(PlainSelect plainSelect) {
+            visit(plainSelect, (Object) null);
+        }
+
+        @Override
+        public <S> Void visit(SetOperationList setOpList, S context) {
             if (CollectionUtils.isNotEmpty(setOpList.getSelects())) {
-                for (SelectBody select : setOpList.getSelects()) {
-                    select.accept(this);
+                for (net.sf.jsqlparser.statement.select.Select select : setOpList.getSelects()) {
+                    acceptSelect(select, this);
                 }
             }
             if (setOpList.getOffset() != null) {
@@ -1193,25 +1342,73 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                     setOpList.getLimit().getOffset().accept(this);
                 }
             }
+            return null;
         }
 
         @Override
-        public void visit(WithItem withItem) {
+        public void visit(SetOperationList setOpList) {
+            visit(setOpList, (Object) null);
+        }
+
+        @Override
+        public <S> Void visit(WithItem<?> withItem, S context) {
             if (CollectionUtils.isNotEmpty(withItem.getWithItemList())) {
-                for (SelectItem selectItem : withItem.getWithItemList()) {
-                    selectItem.accept(this);
+                for (SelectItem<?> selectItem : withItem.getWithItemList()) {
+                    acceptSelectItem(selectItem, this);
                 }
             }
-            if (withItem.getSubSelect() != null) {
-                withItem.getSubSelect().accept((ExpressionVisitor) this);
+            if (withItem.getSelect() != null) {
+                acceptSelect(withItem.getSelect(), this);
             }
+            return null;
         }
 
         @Override
-        public void visit(ValuesStatement aThis) {
-            if (aThis.getExpressions() != null) {
-                aThis.getExpressions().accept(this);
+        public <S> Void visit(ParenthesedSelect select, S context) {
+            if (select.getSelect() != null) {
+                acceptSelect(select.getSelect(), this);
             }
+            return null;
+        }
+
+        @Override
+        public void visit(ParenthesedSelect select) {
+            visit(select, (Object) null);
+        }
+
+        @Override
+        public <S> Void visit(TableStatement tableStatement, S context) {
+            return null;
+        }
+
+        @Override
+        public void visit(TableStatement tableStatement) {
+        }
+
+        @Override
+        public <S> Void visit(FromQuery fromQuery, S context) {
+            if (fromQuery.getFromItem() != null) {
+                acceptFromItem(fromQuery.getFromItem(), this);
+            }
+            if (CollectionUtils.isNotEmpty(fromQuery.getJoins())) {
+                for (net.sf.jsqlparser.statement.select.Join join : fromQuery.getJoins()) {
+                    if (join.getRightItem() != null) {
+                        acceptFromItem(join.getRightItem(), this);
+                    }
+                    if (join.getOnExpressions() != null) {
+                        join.getOnExpressions().forEach(expr -> expr.accept(this));
+                    }
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public <S> Void visit(SelectItem<? extends Expression> selectItem, S context) {
+            if (selectItem.getExpression() != null) {
+                selectItem.getExpression().accept(this);
+            }
+            return null;
         }
     }
 
@@ -1227,6 +1424,16 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             fake.setName(name);
             addColumn(fake);
             return Optional.of(fake);
+        }
+    }
+
+    private static class ParsedSelect {
+        final net.sf.jsqlparser.statement.select.Select select;
+        final String operatorPlaceholder;
+
+        private ParsedSelect(net.sf.jsqlparser.statement.select.Select select, String operatorPlaceholder) {
+            this.select = select;
+            this.operatorPlaceholder = operatorPlaceholder;
         }
     }
 
