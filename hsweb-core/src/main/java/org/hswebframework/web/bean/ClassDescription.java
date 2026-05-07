@@ -2,13 +2,10 @@ package org.hswebframework.web.bean;
 
 import lombok.Getter;
 import org.hswebframework.web.dict.EnumDict;
+import org.springframework.util.ReflectionUtils;
 
 import java.lang.reflect.Field;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.*;
 
 @Getter
 public class ClassDescription {
@@ -32,16 +29,16 @@ public class ClassDescription {
         this.enumDict = EnumDict.class.isAssignableFrom(type);
         this.arrayType = type.isArray();
         this.enumType = type.isEnum();
-        this.fieldSize = type.getDeclaredFields().length;
         this.number = Number.class.isAssignableFrom(type);
         if (enumType) {
             this.enums = type.getEnumConstants();
         } else {
             this.enums = null;
         }
-        this.fields = Arrays
-                .stream(type.getDeclaredFields())
-                .collect(Collectors.toMap(Field::getName, f -> f, (a, b) -> b));
+        Map<String, Field> fields = new HashMap<>();
+        ReflectionUtils.doWithFields(type, field -> fields.put(field.getName(), field));
+        this.fields = Collections.unmodifiableMap(fields);
+        this.fieldSize = this.fields.size();
     }
 
 }

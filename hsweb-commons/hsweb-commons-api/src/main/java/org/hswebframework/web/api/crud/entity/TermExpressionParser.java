@@ -9,6 +9,7 @@ import org.hswebframework.ezorm.core.param.Term;
 import org.hswebframework.ezorm.core.param.TermType;
 
 import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -82,7 +83,7 @@ public class TermExpressionParser {
     @SneakyThrows
     public static List<Term> parse(String expression) {
         try {
-            expression = URLDecoder.decode(expression, "utf-8");
+            expression = URLDecoder.decode(expression, StandardCharsets.UTF_8);
         } catch (Throwable ignore) {
 
         }
@@ -91,15 +92,13 @@ public class TermExpressionParser {
         NestConditional<?> nest = null;
 
         // 字符容器
-        char[] buf = new char[128];
-        // 记录词项的长度, Arrays.copyOf使用
-        byte len = 0;
+        StringBuilder buf = new StringBuilder(128);
         // 空格数量?
         byte spaceLen = 0;
         // 当前列
-        char[] currentColumn = null;
+        String currentColumn = null;
         // 当前列对应的值
-        char[] currentValue = null;
+        String currentValue = null;
         // 当前条件类型 eq btw in ...
         String currentTermType = null;
         // 当前链接类型 and / or
@@ -124,24 +123,24 @@ public class TermExpressionParser {
                 nest = (nest == null ?
                         (currentType.equals("or") ? conditional.orNest() : conditional.nest()) :
                         (currentType.equals("or") ? nest.orNest() : nest.nest()));
-                len = 0;
+                buf.setLength(0);
                 continue;
             } else if (c == ')') {
                 if (nest == null) {
                     continue;
                 }
                 if (null != currentColumn) {
-                    currentValue = Arrays.copyOf(buf, len);
-                    nest.accept(new String(currentColumn), convertTermType(currentTermType), new String(currentValue));
+                    currentValue = buf.toString();
+                    nest.accept(currentColumn, convertTermType(currentTermType), currentValue);
                     currentColumn = null;
                     currentTermType = null;
                 }
                 Object end = nest.end();
-                nest = end instanceof NestConditional ? ((NestConditional) end) : null;
-                len = 0;
+                nest = end instanceof NestConditional ? ((NestConditional<?>) end) : null;
+                buf.setLength(0);
                 spaceLen++;
                 continue;
-            } else if (c == '=' || c == '>' || c == '<') {
+            } else if (c == '=' || c == '>' || c == '<' || c == '!') {
                 if (currentTermType != null) {
                     currentTermType += String.valueOf(c);
                     //spaceLen--;
@@ -150,44 +149,44 @@ public class TermExpressionParser {
                 }
 
                 if (currentColumn == null) {
-                    currentColumn = Arrays.copyOf(buf, len);
+                    currentColumn = buf.toString();
                 }
                 spaceLen++;
-                len = 0;
+                buf.setLength(0);
                 continue;
             } else if (c == ' ') {
-                if (len == 0) {
+                if (buf.isEmpty()) {
                     continue;
                 }
                 if (quotationMarks != 0) {
                     // 如果当前字符是空格，并且前面迭代时碰到过单/双引号, 不处理并且添加到buf中
-                    buf[len++] = c;
+                    buf.append(c);
                     continue;
                 }
                 spaceLen++;
                 if (currentColumn == null && (spaceLen == 1 || spaceLen % 5 == 0)) {
-                    currentColumn = Arrays.copyOf(buf, len);
-                    len = 0;
+                    currentColumn = buf.toString();
+                    buf.setLength(0);
                     continue;
                 }
                 if (null != currentColumn) {
                     if (null == currentTermType) {
-                        currentTermType = new String(Arrays.copyOf(buf, len));
-                        len = 0;
+                        currentTermType = buf.toString();
+                        buf.setLength(0);
                         continue;
                     }
-                    currentValue = Arrays.copyOf(buf, len);
+                    currentValue = buf.toString();
                     if (nest != null) {
-                        nest.accept(new String(currentColumn), convertTermType(currentTermType), new String(currentValue));
+                        nest.accept(currentColumn, convertTermType(currentTermType), currentValue);
                     } else {
-                        conditional.accept(new String(currentColumn), convertTermType(currentTermType), new String(currentValue));
+                        conditional.accept(currentColumn, convertTermType(currentTermType), currentValue);
                     }
                     currentColumn = null;
                     currentTermType = null;
-                    len = 0;
+                    buf.setLength(0);
                     continue;
-                } else if (len == 2 || len == 3) {
-                    String type = new String(Arrays.copyOf(buf, len));
+                } else if (buf.length() == 2 || buf.length() == 3) {
+                    String type = buf.toString();
                     if (type.equalsIgnoreCase("or")) {
                         currentType = "or";
                         if (nest != null) {
@@ -195,7 +194,7 @@ public class TermExpressionParser {
                         } else {
                             conditional.or();
                         }
-                        len = 0;
+                        buf.setLength(0);
                         continue;
                     } else if (type.equalsIgnoreCase("and")) {
                         currentType = "and";
@@ -204,29 +203,29 @@ public class TermExpressionParser {
                         } else {
                             conditional.and();
                         }
-                        len = 0;
+                        buf.setLength(0);
                         continue;
                     } else {
-                        currentColumn = Arrays.copyOf(buf, len);
-                        len = 0;
+                        currentColumn = buf.toString();
+                        buf.setLength(0);
                         spaceLen++;
                     }
                 } else {
-                    currentColumn = Arrays.copyOf(buf, len);
-                    len = 0;
+                    currentColumn = buf.toString();
+                    buf.setLength(0);
                     spaceLen++;
                 }
                 continue;
             }
 
-            buf[len++] = c;
+            buf.append(c);
         }
         if (null != currentColumn) {
-            currentValue = Arrays.copyOf(buf, len);
+            currentValue = buf.toString();
             if (nest != null) {
-                nest.accept(new String(currentColumn), convertTermType(currentTermType), new String(currentValue));
+                nest.accept(currentColumn, convertTermType(currentTermType), currentValue);
             } else {
-                conditional.accept(new String(currentColumn), convertTermType(currentTermType), new String(currentValue));
+                conditional.accept(currentColumn, convertTermType(currentTermType), currentValue);
             }
         }
         return conditional.getParam().getTerms();
@@ -270,6 +269,8 @@ public class TermExpressionParser {
                 return TermType.gte;
             case "<=":
                 return TermType.lte;
+            case "!=":
+                return TermType.not;
             default:
                 return termType;
         }

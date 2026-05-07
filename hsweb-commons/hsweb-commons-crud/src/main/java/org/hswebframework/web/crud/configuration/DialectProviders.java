@@ -26,7 +26,7 @@ public class DialectProviders {
         DialectProvider provider = allSupportedDialect.get(dialect);
         if (provider == null) {
             if (dialect.contains(".")) {
-                provider = (DialectProvider) Class.forName(dialect).newInstance();
+                provider = (DialectProvider) Class.forName(dialect).getConstructor().newInstance();
                 allSupportedDialect.put(dialect, provider);
             } else {
                 throw new UnsupportedOperationException("unsupported dialect : " + dialect + ",all alive dialect :" + allSupportedDialect.keySet());

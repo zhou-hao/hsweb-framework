@@ -38,6 +38,7 @@ public class FastBeanCopierTest {
         Assert.assertEquals(source.getExtension("color"), e.getExtension("color"));
 
     }
+
     @Test
     public void testToExtendable() {
         Source source = new Source();
@@ -67,13 +68,14 @@ public class FastBeanCopierTest {
         Source source = new Source();
         ExtendableEntity e = FastBeanCopier.copy(source, new ExtendableEntity());
         e.setName("test");
-        e.setExtension("age",123);
+        e.setExtension("age", 123);
         FastBeanCopier.copy(e, source);
         Assert.assertEquals(e.getName(), source.getName());
         Assert.assertEquals(e.getExtension("age"), source.getAge());
 
 
     }
+
     @Test
     public void testMapToExtendable() {
         Source source = new Source();
@@ -219,7 +221,7 @@ public class FastBeanCopierTest {
                         return clazz;
                     }
                 } catch (Throwable ignore) {
-                  //  ignore.printStackTrace();
+                     //ignore.printStackTrace();
                 }
                 return super.loadClass(name, resolve);
             }
@@ -305,4 +307,34 @@ public class FastBeanCopierTest {
         void setName(String name);
     }
 
+    @Test
+    public void testExtendsExtendable() {
+        ExtendableExtends ext = new ExtendableExtends();
+        ext.setId("test");
+        ext.setName("hehe");
+        ext.setExtension("ext1", "haha");
+        Map<String, Object> map = FastBeanCopier.copy(ext, new HashMap<>());
+        Assert.assertNotNull(map.get("id"));
+        Assert.assertNotNull(map.get("name"));
+        Assert.assertNotNull(map.get("ext1"));
+
+        ExtendableExtends ext2 = FastBeanCopier.copy(map, new ExtendableExtends());
+        Assert.assertEquals(ext.getId(),ext2.getId());
+        Assert.assertEquals(ext.getName(),ext2.getName());
+        Assert.assertEquals(ext.getExtensions(),ext2.getExtensions());
+
+
+    }
+
+    @Getter
+    @Setter
+    public static class ExtendableSuper extends DefaultExtendable {
+        private String id;
+    }
+
+    @Getter
+    @Setter
+    public static class ExtendableExtends extends ExtendableSuper {
+        private String name;
+    }
 }

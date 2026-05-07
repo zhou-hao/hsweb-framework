@@ -1,6 +1,7 @@
 package org.hswebframework.web.bean;
 
 import com.google.common.collect.Maps;
+import io.netty.util.internal.ConcurrentSet;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.SneakyThrows;
@@ -24,6 +25,7 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -550,7 +552,7 @@ public final class FastBeanCopier {
 
         public Collection<?> newCollection(Class<?> targetClass) {
 
-            if (targetClass == List.class) {
+            if (targetClass == List.class || targetClass == Collection.class) {
                 return new ArrayList<>();
             } else if (targetClass == ConcurrentHashMap.KeySetView.class) {
                 return ConcurrentHashMap.newKeySet();
@@ -561,7 +563,7 @@ public final class FastBeanCopier {
             } else {
                 try {
                     return (Collection<?>) targetClass.getDeclaredConstructor().newInstance();
-                } catch (Throwable e) {
+                } catch (Exception e) {
                     throw new UnsupportedOperationException("Unsupported Collection Type:" + targetClass, e);
                 }
             }

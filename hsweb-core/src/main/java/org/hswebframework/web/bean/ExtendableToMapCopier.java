@@ -13,8 +13,8 @@ class ExtendableToMapCopier implements Copier {
 
     @Override
     public void copy(Object source, Object target, Set<String> ignore, Converter converter) {
-        copier.copy(source, target, ignore, converter);
         ExtendableUtils.copyToMap((Extendable) source, ignore, (Map<String, Object>) target);
+        copier.copy(source, target, ignore, converter);
         //移除map中的extensions
         ((Map<?, ?>) target).remove("extensions");
     }

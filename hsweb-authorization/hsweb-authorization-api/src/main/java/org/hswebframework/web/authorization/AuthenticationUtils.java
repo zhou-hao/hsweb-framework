@@ -1,13 +1,47 @@
 package org.hswebframework.web.authorization;
 
+import org.hswebframework.web.authorization.simple.SimpleAuthentication;
 import org.springframework.util.ObjectUtils;
 import org.springframework.util.StringUtils;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 /**
  * @author zhouhao
  * @since 3.0
  */
 public class AuthenticationUtils {
+
+
+    public static Mono<Authentication> merge(Flux<Authentication> authenticationFlux){
+        return authenticationFlux
+            .collect(AuthenticationMerging::new, AuthenticationMerging::merge)
+            .mapNotNull(AuthenticationMerging::get);
+    }
+
+    static class AuthenticationMerging {
+
+        private Authentication auth;
+        private int count;
+
+        public synchronized void merge(Authentication auth) {
+            if (this.auth == null || this.auth == auth) {
+                this.auth = auth;
+            } else {
+                if (count++ == 0) {
+                    SimpleAuthentication newAuth = new SimpleAuthentication();
+                    newAuth.merge(this.auth);
+                    this.auth = newAuth;
+                }
+                this.auth.merge(auth);
+            }
+        }
+
+        Authentication get() {
+            return auth;
+        }
+    }
+
 
     public static AuthenticationPredicate createPredicate(String expression) {
         if (ObjectUtils.isEmpty(expression)) {

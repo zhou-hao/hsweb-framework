@@ -27,6 +27,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import jakarta.validation.ValidationException;
+
 import java.util.Objects;
 
 
@@ -59,14 +60,14 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     @Transactional(rollbackFor = Exception.class, transactionManager = TransactionManagers.reactiveTransactionManager)
     public Mono<Boolean> saveUser(Mono<UserEntity> request) {
         return request
-                .flatMap(userEntity -> {
-                    if (ObjectUtils.isEmpty(userEntity.getId())) {
-                        return doAdd(userEntity);
-                    }
-                    return findById(userEntity.getId())
-                            .flatMap(old -> doUpdate(old, userEntity))
-                            .switchIfEmpty(doAdd(userEntity));
-                }).thenReturn(true);
+            .flatMap(userEntity -> {
+                if (ObjectUtils.isEmpty(userEntity.getId())) {
+                    return doAdd(userEntity);
+                }
+                return findById(userEntity.getId())
+                    .flatMap(old -> doUpdate(old, userEntity))
+                    .switchIfEmpty(doAdd(userEntity));
+            }).thenReturn(true);
     }
 
     @Override
@@ -75,15 +76,17 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     }
 
     protected Mono<UserEntity> doAdd(UserEntity userEntity) {
-
-        return Mono
-                .defer(() -> {
-                    usernameValidator.validate(userEntity.getUsername());
-                    passwordValidator.validate(userEntity.getPassword());
-                    userEntity.generateId();
-                    userEntity.setSalt(IDGenerator.RANDOM.generate());
-                    userEntity.setPassword(passwordEncoder.encode(userEntity.getPassword(), userEntity.getSalt()));
-                    return this
+        return new UserBeforeCreateEvent(userEntity)
+            .publish(eventPublisher)
+            .then(
+                Mono
+                    .defer(() -> {
+                        usernameValidator.validate(userEntity.getUsername());
+                        passwordValidator.validate(userEntity.getPassword());
+                        userEntity.generateId();
+                        userEntity.setSalt(IDGenerator.RANDOM.generate());
+                        userEntity.setPassword(passwordEncoder.encode(userEntity.getPassword(), userEntity.getSalt()));
+                        return this
                             .createQuery()
                             .where(userEntity::getUsername)
                             .fetch()
@@ -98,43 +101,43 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
                             .thenReturn(userEntity)
                             .flatMap(user -> new UserCreatedEvent(user).publish(eventPublisher))
                             .thenReturn(userEntity);
-                });
+                    }));
 
     }
 
 
     protected Mono<UserEntity> doUpdate(UserEntity old, UserEntity newer) {
         return Mono
-                .defer(() -> {
-                    boolean updatePassword = StringUtils.hasText(newer.getPassword());
+            .defer(() -> {
+                boolean updatePassword = StringUtils.hasText(newer.getPassword());
 
-                    boolean passwordChanged = updatePassword &&
-                            !Objects.equals(
-                                    passwordEncoder.encode(newer.getPassword(), old.getSalt()),
-                                    old.getPassword()
-                            );
+                boolean passwordChanged = updatePassword &&
+                    !Objects.equals(
+                        passwordEncoder.encode(newer.getPassword(), old.getSalt()),
+                        old.getPassword()
+                    );
 
-                    String newPassword = passwordChanged ? newer.getPassword() : null;
-                    if (updatePassword) {
-                        newer.setSalt(IDGenerator.RANDOM.generate());
-                        passwordValidator.validate(newer.getPassword());
-                        newer.setPassword(passwordEncoder.encode(newer.getPassword(), newer.getSalt()));
-                    }
-                    UserEntity copyEntity = old.copyTo(new UserEntity());
-                    UserEntity newEntity = newer.copyTo(copyEntity);
-                    return getRepository()
-                            .createUpdate()
-                            .set(newer)
-                            .where(newer::getId)
-                            .execute()
-                            .flatMap(__ -> new UserModifiedEvent(old, newEntity, passwordChanged, newPassword)
-                                    .publish(eventPublisher)
-                                    .thenReturn(newEntity))
-                            .flatMap(e -> ClearUserAuthorizationCacheEvent
-                                    .of(e.getId())
-                                    .publish(eventPublisher)
-                                    .thenReturn(e));
-                });
+                String newPassword = passwordChanged ? newer.getPassword() : null;
+                if (updatePassword) {
+                    newer.setSalt(IDGenerator.RANDOM.generate());
+                    passwordValidator.validate(newer.getPassword());
+                    newer.setPassword(passwordEncoder.encode(newer.getPassword(), newer.getSalt()));
+                }
+                UserEntity copyEntity = old.copyTo(new UserEntity());
+                UserEntity newEntity = newer.copyTo(copyEntity);
+                return getRepository()
+                    .createUpdate()
+                    .set(newer)
+                    .where(newer::getId)
+                    .execute()
+                    .flatMap(__ -> new UserModifiedEvent(old, newEntity, passwordChanged, newPassword)
+                        .publish(eventPublisher)
+                        .thenReturn(newEntity))
+                    .flatMap(e -> ClearUserAuthorizationCacheEvent
+                        .of(e.getId())
+                        .publish(eventPublisher)
+                        .thenReturn(e));
+            });
 
     }
 
@@ -149,9 +152,9 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     public Mono<UserEntity> findByUsername(String username) {
         return Mono.justOrEmpty(username)
                    .flatMap(_name -> repository
-                           .createQuery()
-                           .where(UserEntity::getUsername, _name)
-                           .fetchOne());
+                       .createQuery()
+                       .where(UserEntity::getUsername, _name)
+                       .fetchOne());
     }
 
     @Override
@@ -159,12 +162,12 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     public Mono<UserEntity> findByUsernameAndPassword(String username, String plainPassword) {
         return Mono.justOrEmpty(username)
                    .flatMap(_name -> repository
-                           .createQuery()
-                           .where(UserEntity::getUsername, _name)
-                           .fetchOne())
+                       .createQuery()
+                       .where(UserEntity::getUsername, _name)
+                       .fetchOne())
                    .filter(user -> passwordEncoder
-                           .encode(plainPassword, user.getSalt())
-                           .equals(user.getPassword()));
+                       .encode(plainPassword, user.getSalt())
+                       .equals(user.getPassword()));
     }
 
     @Override
@@ -174,16 +177,16 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
                    .collectList()
                    .filter(CollectionUtils::isNotEmpty)
                    .flatMap(list -> repository
-                           .createUpdate()
-                           .set(UserEntity::getStatus, state)
-                           .where()
-                           .in(UserEntity::getId, list)
-                           .execute()
-                           .flatMap(i -> UserStateChangedEvent
-                                   .of(list, state)
-                                   .publish(eventPublisher)
-                                   .thenReturn(i)
-                           )
+                       .createUpdate()
+                       .set(UserEntity::getStatus, state)
+                       .where()
+                       .in(UserEntity::getId, list)
+                       .execute()
+                       .flatMap(i -> UserStateChangedEvent
+                           .of(list, state)
+                           .publish(eventPublisher)
+                           .thenReturn(i)
+                       )
                    )
                    .defaultIfEmpty(0);
     }
@@ -193,54 +196,54 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     public Mono<Boolean> changePassword(String userId, String oldPassword, String newPassword) {
         passwordValidator.validate(newPassword);
         return findById(userId)
-                .switchIfEmpty(Mono.error(NotFoundException.NoStackTrace::new))
-                .filter(user -> passwordEncoder.encode(oldPassword, user.getSalt()).equals(user.getPassword()))
-                .switchIfEmpty(Mono.error(() -> new ValidationException("error.illegal_user_password")))
-                .flatMap(old -> {
-                    String encodePwd = passwordEncoder.encode(newPassword, old.getSalt());
+            .switchIfEmpty(Mono.error(NotFoundException.NoStackTrace::new))
+            .filter(user -> passwordEncoder.encode(oldPassword, user.getSalt()).equals(user.getPassword()))
+            .switchIfEmpty(Mono.error(() -> new ValidationException("error.illegal_user_password")))
+            .flatMap(old -> {
+                String encodePwd = passwordEncoder.encode(newPassword, old.getSalt());
 
-                    boolean passwordChanged = !Objects.equals(encodePwd, old.getPassword());
-                    UserEntity newer = old.copyTo(new UserEntity());
-                    newer.setPassword(encodePwd);
-                    return repository
-                            .createUpdate()
-                            .set(newer::getPassword)
-                            .where(newer::getId)
-                            .execute()
-                            .flatMap(e -> new UserModifiedEvent(old, newer, passwordChanged, newPassword)
-                                    .publish(eventPublisher)
-                                    .thenReturn(e));
-                })
-                .map(i -> i > 0);
+                boolean passwordChanged = !Objects.equals(encodePwd, old.getPassword());
+                UserEntity newer = old.copyTo(new UserEntity());
+                newer.setPassword(encodePwd);
+                return repository
+                    .createUpdate()
+                    .set(newer::getPassword)
+                    .where(newer::getId)
+                    .execute()
+                    .flatMap(e -> new UserModifiedEvent(old, newer, passwordChanged, newPassword)
+                        .publish(eventPublisher)
+                        .thenReturn(e));
+            })
+            .map(i -> i > 0);
     }
 
     @Override
     @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
     public Flux<UserEntity> findUser(QueryParam queryParam) {
         return repository
-                .createQuery()
-                .setParam(queryParam)
-                .fetch();
+            .createQuery()
+            .setParam(queryParam)
+            .fetch();
     }
 
     @Override
     @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
     public Mono<Integer> countUser(QueryParam queryParam) {
         return repository
-                .createQuery()
-                .setParam(queryParam)
-                .count();
+            .createQuery()
+            .setParam(queryParam)
+            .count();
     }
 
     @Override
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     public Mono<Boolean> deleteUser(String userId) {
         return this
-                .findById(userId)
-                .flatMap(user -> this
-                        .deleteById(Mono.just(userId))
-                        .flatMap(i -> new UserDeletedEvent(user).publish(eventPublisher))
-                        .thenReturn(true));
+            .findById(userId)
+            .flatMap(user -> this
+                .deleteById(Mono.just(userId))
+                .flatMap(i -> new UserDeletedEvent(user).publish(eventPublisher))
+                .thenReturn(true));
     }
 
     @Override

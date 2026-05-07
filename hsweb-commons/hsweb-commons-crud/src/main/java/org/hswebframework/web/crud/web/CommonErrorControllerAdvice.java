@@ -13,6 +13,8 @@ import org.hswebframework.web.exception.ValidationException;
 import org.hswebframework.web.i18n.LocaleUtils;
 import org.hswebframework.web.logger.ReactiveLogger;
 import org.springframework.core.annotation.Order;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.TransactionException;
@@ -25,6 +27,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.bind.support.WebExchangeBindException;
+import org.springframework.web.reactive.function.client.WebClientException;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import org.springframework.web.reactive.resource.NoResourceFoundException;
 import org.springframework.web.server.*;
 import reactor.core.publisher.Mono;
@@ -174,26 +178,27 @@ public class CommonErrorControllerAdvice {
     @ExceptionHandler
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public Mono<ResponseMessage<?>> handleException(jakarta.validation.ValidationException e) {
-        return Mono.just(ResponseMessage.error(400, CodeConstants.Error.illegal_argument, e.getMessage()));
+        return Mono.just(ResponseMessage.error(400, CodeConstants.Error.illegal_argument, e.getLocalizedMessage()));
     }
 
     @ExceptionHandler
     @ResponseStatus(HttpStatus.GATEWAY_TIMEOUT)
     public Mono<ResponseMessage<Object>> handleException(TimeoutException e) {
         return LocaleUtils
-            .resolveThrowable(e, (err, msg) -> ResponseMessage.error(504, CodeConstants.Error.timeout, msg))
-            .doOnEach(ReactiveLogger.onNext(r -> log.warn(e.getLocalizedMessage(), e)));
+            .resolveThrowable(e, (err, msg) -> {
+                log.warn(msg, err);
+                return ResponseMessage.error(504, CodeConstants.Error.timeout, msg);
+            });
     }
 
     @ExceptionHandler
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     @Order
     public Mono<ResponseMessage<Object>> handleException(RuntimeException e) {
+        log.warn(e.getLocalizedMessage(), e);
         return LocaleUtils
-            .resolveThrowable(e, (err, msg) -> {
-                log.warn(msg, e);
-                return ResponseMessage.error(msg);
-            });
+            .resolveMessageReactive("error.internal_server_error")
+            .map(msg -> ResponseMessage.error(500, CodeConstants.Error.internal_server_error, msg));
     }
 
     @ExceptionHandler
@@ -203,7 +208,7 @@ public class CommonErrorControllerAdvice {
 
         return LocaleUtils
             .resolveMessageReactive("error.internal_server_error")
-            .map(msg -> ResponseMessage.error(500, "internal_server_error", msg));
+            .map(msg -> ResponseMessage.error(500, CodeConstants.Error.internal_server_error, msg));
     }
 
     @ExceptionHandler
@@ -288,5 +293,22 @@ public class CommonErrorControllerAdvice {
         return e.getLocalizedMessageReactive()
                 .map(msg -> ResponseMessage.error(400, e.getI18nCode(), msg));
     }
+
+    @ExceptionHandler
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Mono<ResponseMessage<Object>> handleException(DataAccessException e) {
+        return LocaleUtils
+            .resolveMessageReactive("error.data_access_failed")
+            .map(msg -> ResponseMessage.error(400, "data_access_failed", msg));
+    }
+
+    @ExceptionHandler
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Mono<ResponseMessage<Object>> handleException(DuplicateKeyException e) {
+        return LocaleUtils
+            .resolveMessageReactive("error.duplicate_key")
+            .map(msg -> ResponseMessage.error(400, "duplicate_key", msg));
+    }
+
 
 }

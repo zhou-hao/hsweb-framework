@@ -5,13 +5,14 @@ import org.hswebframework.ezorm.rdb.executor.SyncSqlExecutor;
 import org.hswebframework.ezorm.rdb.executor.reactive.ReactiveSqlExecutor;
 import org.hswebframework.ezorm.rdb.executor.reactive.ReactiveSyncSqlExecutor;
 import org.hswebframework.web.crud.sql.DefaultR2dbcExecutor;
+import org.hswebframework.web.crud.utils.TransactionUtils;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigureAfter;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.transaction.ReactiveTransactionManager;
 
 @AutoConfiguration
 @AutoConfigureAfter(name = "org.springframework.boot.autoconfigure.r2dbc.R2dbcAutoConfiguration")
@@ -30,5 +31,11 @@ public class R2dbcSqlExecutorConfiguration {
     @ConditionalOnMissingBean
     public SyncSqlExecutor syncSqlExecutor(ReactiveSqlExecutor reactiveSqlExecutor) {
         return ReactiveSyncSqlExecutor.of(reactiveSqlExecutor);
+    }
+
+    @Bean
+    public SmartInitializingSingleton transactionUtilsSetup(ReactiveTransactionManager transactionManager){
+        TransactionUtils.setup(transactionManager);
+        return ()->{};
     }
 }

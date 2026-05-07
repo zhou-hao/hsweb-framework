@@ -19,9 +19,9 @@
 package org.hswebframework.web.authorization;
 
 import com.google.common.collect.Lists;
-import org.hswebframework.web.authorization.simple.SimpleAuthentication;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.context.Context;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -45,11 +45,14 @@ import java.util.function.Function;
 public final class ReactiveAuthenticationHolder {
     private static final List<ReactiveAuthenticationSupplier> suppliers = new CopyOnWriteArrayList<>();
 
+    public static final String IGNORE_AUTH_KEY = ".auth.ignore";
+
+    static final Context IGNORE_AUTH_CONTEXT_Y = Context.of(IGNORE_AUTH_KEY, true);
+    static final Context IGNORE_AUTH_CONTEXT_N = Context.of(IGNORE_AUTH_KEY, false);
+
     private static Mono<Authentication> get(Function<ReactiveAuthenticationSupplier, Mono<Authentication>> function) {
-        return Flux
-            .merge(Lists.transform(suppliers, function::apply))
-            .collect(AuthenticationMerging::new, AuthenticationMerging::merge)
-            .mapNotNull(AuthenticationMerging::get);
+        return AuthenticationUtils
+            .merge(Flux.merge(Lists.transform(suppliers, function::apply)));
     }
 
     /**
@@ -57,7 +60,12 @@ public final class ReactiveAuthenticationHolder {
      */
     public static Mono<Authentication> get() {
 
-        return get(ReactiveAuthenticationSupplier::get);
+        return Mono.deferContextual(ctx -> {
+            if (Boolean.TRUE.equals(ctx.getOrDefault(IGNORE_AUTH_KEY, false))) {
+                return Mono.empty();
+            }
+            return get(ReactiveAuthenticationSupplier::get);
+        });
     }
 
     /**
@@ -84,28 +92,15 @@ public final class ReactiveAuthenticationHolder {
         suppliers.add(supplier);
     }
 
-
-    static class AuthenticationMerging {
-
-        private Authentication auth;
-        private int count;
-
-        public synchronized void merge(Authentication auth) {
-            if (this.auth == null || this.auth == auth) {
-                this.auth = auth;
-            } else {
-                if (count++ == 0) {
-                    SimpleAuthentication newAuth = new SimpleAuthentication();
-                    newAuth.merge(this.auth);
-                    this.auth = newAuth;
-                }
-                this.auth.merge(auth);
-            }
-        }
-
-        Authentication get() {
-            return auth;
-        }
+    public static Context ignoreContext(boolean ignore) {
+        return ignore ? IGNORE_AUTH_CONTEXT_Y : IGNORE_AUTH_CONTEXT_N;
     }
+
+    public static Function<Context, Context> ignoreIfAbsent(boolean ignore) {
+        return ctx -> ctx.hasKey(IGNORE_AUTH_KEY)
+            ? ctx
+            : ctx.put(IGNORE_AUTH_KEY, ignore);
+    }
+
 
 }

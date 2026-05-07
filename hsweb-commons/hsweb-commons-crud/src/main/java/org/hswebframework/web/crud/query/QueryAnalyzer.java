@@ -95,7 +95,7 @@ public interface QueryAnalyzer {
     @RequiredArgsConstructor
     @Getter
     class Select {
-        private transient Map<String, Column> columns;
+        private transient volatile Map<String, Column> columns;
 
         final List<Column> columnList;
 
@@ -109,12 +109,40 @@ public interface QueryAnalyzer {
                               table.newAlias(alias));
         }
 
+        public Optional<Column> findColumn(String name) {
+            Map<String, Column> columnMap = getColumns();
+            Column column = columnMap.get(name);
+
+            if (column != null) {
+                return Optional.of(column);
+            }
+
+            String snake = QueryHelperUtils.toSnake(name);
+            column = columnMap.get(snake);
+            if (column != null) {
+                return Optional.of(column);
+            }
+
+            return Optional.empty();
+
+        }
+
+        @Deprecated
         public Map<String, Column> getColumns() {
-            return columns == null
-                ? columns = columnList
-                .stream()
-                .collect(Collectors.toMap(Column::getAlias, Function.identity(), (a, b) -> b))
-                : columns;
+            if (columns == null) {
+                synchronized (this) {
+                    if (columns == null) {
+                        columns = new HashMap<>();
+                        for (Column column : columnList) {
+                            columns.put(column.name, column);
+                            columns.put(column.alias, column);
+                            columns.put(column.getFullName(), column);
+                            columns.put(QueryHelperUtils.toSnake(column.alias), column);
+                        }
+                    }
+                }
+            }
+            return columns;
         }
     }
 
@@ -143,6 +171,10 @@ public interface QueryAnalyzer {
         String owner;
         //元数据信息
         RDBColumnMetadata metadata;
+
+        public String getFullName() {
+            return owner != null ? owner + "." + name : name;
+        }
 
         public Column moveOwner(String owner) {
             return new Column(name, alias, owner, metadata);

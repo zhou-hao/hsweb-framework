@@ -16,6 +16,7 @@ import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.Assert.*;
@@ -111,14 +112,14 @@ public class ReactiveTreeSortEntityServiceTest {
         entity2.setParentId(entity_0.getId());
 
         sortEntityService
-            .save(Arrays.asList(entity2))
+            .save(List.of(entity2))
             .then()
             .as(StepVerifier::create)
             .expectComplete()
             .verify();
 
         sortEntityService
-            .queryIncludeChildren(Arrays.asList(entity_0.getId()))
+            .queryIncludeChildren(Collections.singletonList(entity_0.getId()))
             .as(StepVerifier::create)
             .expectNextCount(3)
             .verifyComplete();

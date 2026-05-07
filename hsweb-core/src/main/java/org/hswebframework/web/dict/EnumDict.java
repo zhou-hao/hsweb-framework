@@ -213,6 +213,9 @@ public interface EnumDict<V> extends JSONSerializable, Serializable {
         }
         long value = 0L;
         for (T t1 : t) {
+            if(t1 == null){
+                continue;
+            }
             value |= t1.getMask();
         }
         return value;

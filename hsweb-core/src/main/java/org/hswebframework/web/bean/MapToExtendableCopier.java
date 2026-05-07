@@ -13,9 +13,8 @@ class MapToExtendableCopier implements Copier {
 
     @Override
     public void copy(Object source, Object target, Set<String> ignore, Converter converter) {
-        copier.copy(source, target, ignore, converter);
-
         ExtendableUtils.copyFromMap((Map<String, Object>) source, ignore, (Extendable) target);
+        copier.copy(source, target, ignore, converter);
     }
 
 

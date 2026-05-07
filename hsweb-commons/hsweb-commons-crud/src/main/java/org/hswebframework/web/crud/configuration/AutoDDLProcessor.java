@@ -11,7 +11,6 @@ import org.hswebframework.ezorm.rdb.operator.DatabaseOperator;
 import org.hswebframework.ezorm.rdb.operator.builder.fragments.ddl.CreateTableSqlBuilder;
 import org.hswebframework.web.api.crud.entity.EntityFactory;
 import org.hswebframework.web.crud.annotation.DDL;
-import org.hswebframework.web.crud.entity.factory.MapperEntityFactory;
 import org.hswebframework.web.crud.events.EntityDDLEvent;
 import org.hswebframework.web.event.GenericsPayloadApplicationEvent;
 import org.springframework.beans.factory.InitializingBean;
@@ -26,7 +25,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 @Getter
 @Setter
@@ -86,9 +84,9 @@ public class AutoDDLProcessor implements InitializingBean {
                                  .autoLoad(false)
                                  .commit()
                                  .reactive()
-                                 .subscribeOn(Schedulers.boundedElastic()),
-                             8,8)
-                    .doOnError((err) -> log.error(err.getMessage(), err))
+                                 .subscribeOn(Schedulers.boundedElastic())
+                                 .doOnError((err) -> log.error("execute ddl {} failed", meta.getName(), err)),
+                             8, 8)
                     .then()
                     .block(Duration.ofMinutes(5));
             } else {
@@ -120,8 +118,11 @@ public class AutoDDLProcessor implements InitializingBean {
             if (table == null) {
                 SqlRequest request = schema.findFeatureNow(CreateTableSqlBuilder.ID).build(metadata);
                 log.info("DDL SQL for {} \n{}", entity, request.toNativeSql());
+                schema.addTable(metadata);
+            } else {
+                table.merge(metadata);
             }
-            schema.addTable(metadata);
+
         }
     }
 }

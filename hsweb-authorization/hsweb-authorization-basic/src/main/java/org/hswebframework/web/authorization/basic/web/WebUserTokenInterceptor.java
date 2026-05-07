@@ -12,6 +12,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.web.servlet.HandlerInterceptor;
 
+import javax.annotation.Nonnull;
+import java.io.Closeable;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -22,6 +24,8 @@ import java.util.stream.Collectors;
  * @author zhouhao
  */
 public class WebUserTokenInterceptor implements HandlerInterceptor {
+
+    static final String TOKEN_ATTR = WebUserTokenInterceptor.class.getName() + ".token";
 
     private final UserTokenManager userTokenManager;
 
@@ -39,22 +43,21 @@ public class WebUserTokenInterceptor implements HandlerInterceptor {
         this.parser = definitionParser;
 
         enableBasicAuthorization = userTokenParser
-                .stream()
-                .filter(UserTokenForTypeParser.class::isInstance)
-                .anyMatch(parser -> "basic".equalsIgnoreCase(((UserTokenForTypeParser) parser).getTokenType()));
+            .stream()
+            .filter(UserTokenForTypeParser.class::isInstance)
+            .anyMatch(parser -> "basic".equalsIgnoreCase(((UserTokenForTypeParser) parser).getTokenType()));
     }
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         List<ParsedToken> tokens = userTokenParser
-                .stream()
-                .map(parser -> parser.parseToken(request))
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+            .stream()
+            .map(parser -> parser.parseToken(request))
+            .filter(Objects::nonNull)
+            .toList();
 
         if (tokens.isEmpty()) {
-            if (enableBasicAuthorization && handler instanceof HandlerMethod) {
-                HandlerMethod method = ((HandlerMethod) handler);
+            if (enableBasicAuthorization && handler instanceof HandlerMethod method) {
                 AuthorizeDefinition definition = parser.parse(method.getBeanType(), method.getMethod());
                 if (null != definition) {
                     response.addHeader("WWW-Authenticate", " Basic realm=\"\"");
@@ -69,20 +72,38 @@ public class WebUserTokenInterceptor implements HandlerInterceptor {
                 userToken = userTokenManager.getByToken(token).blockOptional().orElse(null);
             }
             if ((userToken == null || userToken.isExpired()) && parsedToken instanceof AuthorizedToken) {
-                //先踢出旧token
-                userTokenManager.signOutByToken(token).subscribe();
+                userToken =
+                    userTokenManager
+                        .signOutByToken(token)
+                        .then(
+                            userTokenManager
+                                .signIn(parsedToken.getToken(),
+                                        parsedToken.getType(),
+                                        ((AuthorizedToken) parsedToken).getUserId(),
+                                        ((AuthorizedToken) parsedToken)
+                                            .getMaxInactiveInterval())
+                        )
 
-                userToken = userTokenManager
-                        .signIn(parsedToken.getToken(), parsedToken.getType(), ((AuthorizedToken) parsedToken).getUserId(), ((AuthorizedToken) parsedToken)
-                                .getMaxInactiveInterval())
                         .block();
             }
             if (null != userToken) {
                 userTokenManager.touch(token).subscribe();
-                UserTokenHolder.setCurrent(userToken);
+                request.setAttribute(
+                    TOKEN_ATTR, UserTokenHolder.makeCurrent(userToken)
+                );
             }
         }
         return true;
     }
 
+    @Override
+    public void afterCompletion(HttpServletRequest request,
+                                @Nonnull HttpServletResponse response,
+                                @Nonnull Object handler,
+                                Exception ex) throws Exception {
+        Object closable = request.getAttribute(TOKEN_ATTR);
+        if (closable instanceof Closeable c) {
+            c.close();
+        }
+    }
 }

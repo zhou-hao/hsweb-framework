@@ -65,8 +65,8 @@ public final class AuthenticationHolder {
         if (size == 1) {
             return function.apply(suppliers.get(0));
         }
-        ReactiveAuthenticationHolder.AuthenticationMerging merging
-            = new ReactiveAuthenticationHolder.AuthenticationMerging();
+        AuthenticationUtils.AuthenticationMerging merging
+            = new AuthenticationUtils.AuthenticationMerging();
         for (AuthenticationSupplier supplier : suppliers) {
             function.apply(supplier).ifPresent(merging::merge);
         }
@@ -78,7 +78,7 @@ public final class AuthenticationHolder {
      * @return 当前登录的用户权限信息
      */
     public static Optional<Authentication> get() {
-        Authentication current = CURRENT.get();
+        Authentication current = CURRENT.getIfExists();
         if (current != null) {
             return Optional.of(current);
         }
@@ -109,6 +109,18 @@ public final class AuthenticationHolder {
         }
     }
 
+    public static void resetCurrent() {
+        CURRENT.remove();
+    }
+
+    public static void makeCurrent(Authentication authentication) {
+        if (authentication == null) {
+            resetCurrent();
+        } else {
+            CURRENT.set(authentication);
+        }
+    }
+
     /**
      * 指定用户权限，执行一个任务。任务执行过程中可通过 {@link Authentication#current()}获取到当前权限.
      *
@@ -119,7 +131,7 @@ public final class AuthenticationHolder {
      */
     @SneakyThrows
     public static <T> T executeWith(Authentication current, Callable<T> callable) {
-        Authentication previous = CURRENT.get();
+        Authentication previous = CURRENT.getIfExists();
         try {
             CURRENT.set(current);
             return callable.call();

@@ -14,10 +14,11 @@ import org.hswebframework.web.authorization.exception.UnAuthorizedException;
 import org.hswebframework.web.utils.AnnotationUtils;
 import org.reactivestreams.Publisher;
 import org.springframework.aop.support.StaticMethodMatcherPointcutAdvisor;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.Ordered;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -26,9 +27,6 @@ import reactor.core.publisher.Mono;
 
 import java.lang.reflect.Method;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.function.Consumer;
-import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -38,7 +36,8 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @SuppressWarnings("all")
-public class AopAuthorizingController extends StaticMethodMatcherPointcutAdvisor implements CommandLineRunner, MethodInterceptor {
+public class AopAuthorizingController extends StaticMethodMatcherPointcutAdvisor
+    implements CommandLineRunner, MethodInterceptor, Ordered, SmartInitializingSingleton {
 
     private static final long serialVersionUID = 1154190623020670672L;
 
@@ -112,9 +111,7 @@ public class AopAuthorizingController extends StaticMethodMatcherPointcutAdvisor
         MethodInterceptorContext paramContext = holder.createParamContext();
 
         AuthorizeDefinition definition = aopMethodAuthorizeDefinitionParser
-            .parse(methodInvocation
-                       .getThis()
-                       .getClass(),
+            .parse(methodInvocation.getThis().getClass(),
                    methodInvocation.getMethod(),
                    paramContext);
         Object result = null;
@@ -132,43 +129,26 @@ public class AopAuthorizingController extends StaticMethodMatcherPointcutAdvisor
 
             Authentication authentication = Authentication
                 .current()
-                .orElseThrow(UnAuthorizedException.NoStackTrace::new);
+                .orElse(null);
+
+            if (authentication == null) {
+                // 允许匿名访问
+                if (definition.allowAnonymous()) {
+                    return methodInvocation.proceed();
+                }
+                return new UnAuthorizedException.NoStackTrace();
+            }
 
             context.setAuthentication(authentication);
             isControl = true;
 
-            Phased dataAccessPhased = definition.getResources().getPhased();
             if (definition.getPhased() == Phased.before) {
-                //RDAC before
                 authorizingHandler.handRBAC(context);
-
-                //方法调用前验证数据权限
-                if (dataAccessPhased == Phased.before) {
-                    authorizingHandler.handleDataAccess(context);
-                }
-
                 result = methodInvocation.proceed();
-
-                //方法调用后验证数据权限
-                if (dataAccessPhased == Phased.after) {
-                    context.setParamContext(holder.createParamContext(result));
-                    authorizingHandler.handleDataAccess(context);
-                }
             } else {
-                //方法调用前验证数据权限
-                if (dataAccessPhased == Phased.before) {
-                    authorizingHandler.handleDataAccess(context);
-                }
-
                 result = methodInvocation.proceed();
                 context.setParamContext(holder.createParamContext(result));
-
                 authorizingHandler.handRBAC(context);
-
-                //方法调用后验证数据权限
-                if (dataAccessPhased == Phased.after) {
-                    authorizingHandler.handleDataAccess(context);
-                }
             }
         }
         if (!isControl) {
@@ -201,6 +181,26 @@ public class AopAuthorizingController extends StaticMethodMatcherPointcutAdvisor
 
     @Override
     public void run(String... args) throws Exception {
+//        if (autoParse) {
+//            List<AuthorizeDefinition> definitions = aopMethodAuthorizeDefinitionParser
+//                .getAllParsed()
+//                .stream()
+//                .filter(def -> !def.isEmpty())
+//                .collect(Collectors.toList());
+//            log.info("publish AuthorizeDefinitionInitializedEvent,definition size:{}", definitions.size());
+//            eventPublisher.publishEvent(new AuthorizeDefinitionInitializedEvent(definitions));
+//
+//            //  defaultParser.destroy();
+//        }
+    }
+
+    @Override
+    public int getOrder() {
+        return Ordered.HIGHEST_PRECEDENCE;
+    }
+
+    @Override
+    public void afterSingletonsInstantiated() {
         if (autoParse) {
             List<AuthorizeDefinition> definitions = aopMethodAuthorizeDefinitionParser
                 .getAllParsed()
@@ -213,6 +213,4 @@ public class AopAuthorizingController extends StaticMethodMatcherPointcutAdvisor
             //  defaultParser.destroy();
         }
     }
-
-
 }

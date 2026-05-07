@@ -1,7 +1,10 @@
 package org.hswebframework.web.authorization.token;
 
 
-import org.hswebframework.web.context.ContextUtils;
+import org.hswebframework.web.context.ContextHolder;
+import reactor.util.context.Context;
+
+import java.io.Closeable;
 
 /**
  * @author zhouhao
@@ -12,12 +15,13 @@ public final class UserTokenHolder {
     }
 
     public static UserToken currentToken() {
-        return ContextUtils.currentContext().get(UserToken.class).orElse(null);
+        return ContextHolder
+            .current()
+            .getOrDefault(UserToken.class, null);
     }
 
-    public static UserToken setCurrent(UserToken token) {
-        ContextUtils.currentContext().put(UserToken.class, token);
-        return token;
+    public static Closeable makeCurrent(UserToken token) {
+      return ContextHolder.makeCurrent(Context.of(UserToken.class,token));
     }
 
 }

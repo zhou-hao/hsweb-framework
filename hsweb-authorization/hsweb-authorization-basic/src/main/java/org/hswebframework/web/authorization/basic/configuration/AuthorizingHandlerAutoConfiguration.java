@@ -55,7 +55,7 @@ public class AuthorizingHandlerAutoConfiguration {
 
     @Bean
     public ReactiveAuthenticationManagerProvider embedAuthenticationManager(EmbedAuthenticationProperties properties) {
-        return new EmbedReactiveAuthenticationManager(properties);
+        return properties.getUsers().isEmpty() ? null : new EmbedReactiveAuthenticationManager(properties);
     }
 
     @Bean

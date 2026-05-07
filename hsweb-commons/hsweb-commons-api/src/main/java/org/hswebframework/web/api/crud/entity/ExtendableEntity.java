@@ -46,6 +46,10 @@ public class ExtendableEntity<PK> extends GenericEntity<PK> implements Extendabl
         return extensions;
     }
 
+    public void setExtensions(Map<String, Object> extensions) {
+        this.extensions = extensions == null ? null : new java.util.HashMap<>(extensions);
+    }
+
     @Override
     @JsonAnyGetter
     public Map<String, Object> extensions() {

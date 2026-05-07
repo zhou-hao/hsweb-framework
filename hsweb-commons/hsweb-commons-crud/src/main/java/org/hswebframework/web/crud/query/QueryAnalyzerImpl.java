@@ -5,7 +5,6 @@ import lombok.SneakyThrows;
 import net.sf.jsqlparser.expression.*;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
-import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.select.*;
 import net.sf.jsqlparser.statement.values.ValuesStatement;
 import org.apache.commons.collections4.CollectionUtils;
@@ -13,16 +12,21 @@ import org.hswebframework.ezorm.core.meta.FeatureSupportedMetadata;
 import org.hswebframework.ezorm.core.param.Sort;
 import org.hswebframework.ezorm.core.param.Term;
 import org.hswebframework.ezorm.rdb.executor.SqlRequest;
-import org.hswebframework.ezorm.rdb.metadata.*;
+import org.hswebframework.ezorm.rdb.metadata.RDBColumnMetadata;
+import org.hswebframework.ezorm.rdb.metadata.RDBSchemaMetadata;
+import org.hswebframework.ezorm.rdb.metadata.RDBViewMetadata;
+import org.hswebframework.ezorm.rdb.metadata.TableOrViewMetadata;
 import org.hswebframework.ezorm.rdb.metadata.dialect.Dialect;
 import org.hswebframework.ezorm.rdb.operator.DatabaseOperator;
 import org.hswebframework.ezorm.rdb.operator.builder.fragments.*;
+import org.hswebframework.ezorm.rdb.operator.builder.fragments.function.FunctionFragmentBuilder;
 import org.hswebframework.web.api.crud.entity.QueryParamEntity;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
 import java.util.*;
 
+import static java.util.Optional.ofNullable;
 import static net.sf.jsqlparser.statement.select.PlainSelect.getFormatedList;
 import static org.hswebframework.ezorm.rdb.operator.builder.fragments.TermFragmentBuilder.createFeatureId;
 
@@ -94,7 +98,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             return select.getColumnList().get(index) instanceof ExpressionColumn;
         }
 
-        return select.getColumns().get(name) instanceof ExpressionColumn;
+        return select.findColumn(name).orElse(null) instanceof ExpressionColumn;
     }
 
     private Map<String, Column> getColumnMappings() {
@@ -167,12 +171,8 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
     }
 
     private Column getColumnOrSelectColumn(String name) {
-        Column column = select.getColumns().get(name);
+        Column column = select.findColumn(name).orElse(null);
 
-        if (column != null) {
-            return column;
-        }
-        column = select.getColumns().get(QueryHelperUtils.toSnake(name));
         if (column != null) {
             return column;
         }
@@ -290,9 +290,33 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         QueryAnalyzerImpl sub = new QueryAnalyzerImpl(database, body, this);
         Map<String, Column> columnMap = new LinkedHashMap<>();
         for (Column column : sub.select.getColumnList()) {
+            // 判断子查询的列是否有显式的 SQL 别名（如 select name as n）
+            // vs 隐式的 ORM 别名（如 select * 展开时，别名来自元数据）
+            boolean hasExplicitSqlAlias = column.metadata != null
+                && !Objects.equals(column.alias, column.metadata.getAlias());
+
+            String exposedName;
+            RDBColumnMetadata colMetadata = column.metadata;
+
+            if (hasExplicitSqlAlias) {
+                // 显式 SQL 别名：子查询暴露的列名是 SQL 别名（如 "n"）
+                // 克隆 metadata，设置 name 为别名，清除 realName
+                // 使得 getRealName() 返回别名，realNameDetected() 返回 false（需要大小写规范化）
+                exposedName = column.alias;
+                colMetadata = column.metadata.clone();
+                colMetadata.setName(column.alias);
+                colMetadata.setAlias(column.alias);
+                colMetadata.setRealName(null);
+            } else if (column.metadata == null) {
+                // 表达式列或无元数据：使用别名作为暴露名
+                exposedName = column.alias;
+            } else {
+                // 隐式 ORM 别名（如 select *）：子查询暴露的列名是原始列名
+                exposedName = column.name;
+            }
 
             columnMap.put(column.getAlias(),
-                          new Column(column.name, column.getAlias(), column.owner, column.metadata));
+                          new Column(exposedName, column.getAlias(), column.owner, colMetadata));
         }
 
         select = new QueryAnalyzer.Select(
@@ -325,6 +349,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         }
         String name = parsePlainName(valuesList.getAlias().getName());
         FakeTable view = new FakeTable();
+        view.setSchema(database.getMetadata().getCurrentSchema());
         if (valuesList.getColumnNames() != null) {
             //获取会自动创建列
             for (String columnName : valuesList.getColumnNames()) {
@@ -393,7 +418,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             for (QueryAnalyzer.Column column : selectTable.columns.values()) {
                 String alias = table == select.table ? column.getAlias() : table.alias + "." + column.getAlias();
                 container.add(new QueryAnalyzer.Column(
-                    column.name,
+                    column.getName(),
                     alias,
                     table.alias,
                     column.metadata
@@ -483,14 +508,13 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         Expression expr = selectExpressionItem.getExpression();
         Alias alias = selectExpressionItem.getAlias();
 
-        if (!(expr instanceof net.sf.jsqlparser.schema.Column)) {
+        if (!(expr instanceof net.sf.jsqlparser.schema.Column column)) {
             String aliasName = parsePlainName(alias == null ? expr.toString() : alias.getName());
             refactorAlias(alias);
             select.columnList.add(new ExpressionColumn(aliasName, null, null, selectExpressionItem));
 
             return;
         }
-        net.sf.jsqlparser.schema.Column column = ((net.sf.jsqlparser.schema.Column) expr);
 
         String columnName = parsePlainName(column.getColumnName());
 
@@ -672,6 +696,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             }
 
             String colName = col.metadata != null ? col.metadata.getRealName() : col.name;
+
             String fullName = col.metadata != null
                 ? col.getMetadata().getFullName(table.alias)
                 : table.alias + "." + dialect.quote(colName, false);
@@ -716,6 +741,7 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                 columns.append(select.columnList.get(0).owner).append('.').append('*');
                 return;
             }
+
             for (Column column : select.columnList) {
                 if ("*".equals(column.name)) {
                     continue;
@@ -754,6 +780,14 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
 
             initColumns(columns);
 
+            if (plainSelect.getSelectItems() != null) {
+                PrepareStatementVisitor visitor = new PrepareStatementVisitor();
+                for (SelectItem selectItem : plainSelect.getSelectItems()) {
+                    selectItem.accept(visitor);
+                }
+                prefixParameters += visitor.parameterSize;
+            }
+
             if (plainSelect.getFromItem() != null) {
                 from.append("FROM ");
 
@@ -791,12 +825,21 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             }
 
             if (plainSelect.getOrderByElements() != null) {
+                PrepareStatementVisitor visitor = new PrepareStatementVisitor();
+                for (OrderByElement orderByElement : plainSelect.getOrderByElements()) {
+                    orderByElement.getExpression().accept(visitor);
+                }
+                suffixParameters = visitor.parameterSize;
                 orderBy = getFormatedList(plainSelect.getOrderByElements(), "");
             }
 
             if (plainSelect.getGroupBy() != null) {
                 fastCount = false;
                 suffix.append(' ').append(plainSelect.getGroupBy());
+
+                PrepareStatementVisitor visitor = new PrepareStatementVisitor();
+                plainSelect.getGroupBy().getGroupByExpressionList().accept(visitor);
+                suffixParameters = visitor.parameterSize;
             }
             suffix.append(' ');
 
@@ -835,6 +878,8 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
         public void visit(WithItem withItem) {
             if (!StringUtils.hasText(prefix)) {
                 prefix += "WITH ";
+            } else {
+                prefix += ", ";
             }
             prefix += withItem;
             PrepareStatementVisitor visitor = new PrepareStatementVisitor();
@@ -969,9 +1014,12 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
                         } else {
                             orderByColumn.addSql(",");
                         }
-                        //todo function支持
+                        SqlFragments fragments = ofNullable(sort.getType())
+                            .flatMap(function -> column.metadata.findFeature(FunctionFragmentBuilder.createFeatureId(function)))
+                            .map(builder -> builder.create(columnName, column.metadata, sort.getOpts()))
+                            .orElseGet(() -> PrepareSqlFragments.of(columnName));
                         orderByColumn
-                            .addSql(columnName)
+                            .add(fragments)
                             .addSql(desc ? "DESC" : "ASC");
                     }
                 }
@@ -1101,6 +1149,9 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             if (plainSelect.getJoins() != null) {
                 for (net.sf.jsqlparser.statement.select.Join join : plainSelect.getJoins()) {
                     join.getRightItem().accept(this);
+                    if (join.getOnExpressions() != null) {
+                        join.getOnExpressions().forEach(expr -> expr.accept(this));
+                    }
                 }
             }
             if (plainSelect.getSelectItems() != null) {
@@ -1113,6 +1164,16 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
             }
             if (plainSelect.getHaving() != null) {
                 plainSelect.getHaving().accept(this);
+            }
+
+            if (plainSelect.getDistinct() != null && plainSelect.getDistinct().getOnSelectItems() != null) {
+                plainSelect.getDistinct().getOnSelectItems().forEach(expr -> expr.accept(this));
+            }
+
+            if (plainSelect.getOrderByElements() != null) {
+                for (OrderByElement orderByElement : plainSelect.getOrderByElements()) {
+                    orderByElement.getExpression().accept(this);
+                }
             }
 
             if (plainSelect.getGroupBy() != null) {
@@ -1169,7 +1230,8 @@ class QueryAnalyzerImpl implements FromItemVisitor, SelectItemVisitor, SelectVis
 
             QueryHelperUtils.assertLegalColumn(name);
 
-            RDBColumnMetadata fake = new RDBColumnMetadata();
+            RDBColumnMetadata fake = newColumn();
+            fake.setOwner(this);
             fake.setName(name);
             addColumn(fake);
             return Optional.of(fake);
