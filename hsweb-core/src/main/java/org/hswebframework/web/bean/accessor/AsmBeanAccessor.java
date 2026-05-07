@@ -1,6 +1,7 @@
 package org.hswebframework.web.bean.accessor;
 
 import lombok.SneakyThrows;
+import org.hswebframework.web.bean.FastBeanCopierSupport;
 import org.objectweb.asm.*;
 import org.springframework.core.ResolvableType;
 
@@ -11,14 +12,19 @@ import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class AsmBeanAccessor {
+public class AsmBeanAccessor implements PropertyAccessor {
 
     private static final String PROPERTY_READER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/PropertyReader";
+    private static final String CONVERTER_PROPERTY_TRANSFER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/ConverterPropertyTransfer";
+    private static final String PROPERTY_TRANSFER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/PropertyTransfer";
     private static final String PROPERTY_WRITER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/PropertyWriter";
+    private static final String BEAN_CONVERTER_INTERNAL_NAME = "org/hswebframework/web/bean/Converter";
     private static final String TYPE_CONVERTER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/TypeConverter";
     private static final String RESOLVABLE_TYPE_INTERNAL_NAME = "org/springframework/core/ResolvableType";
+    private static final ClassLoader ACCESSOR_CLASS_LOADER = AsmBeanAccessor.class.getClassLoader();
 
     private static final AtomicInteger COUNTER = new AtomicInteger();
+    private final PropertyAccessor fallback = new ReflectionBeanAccessor();
 
     @SneakyThrows
     public byte[] createReaderCode(Class<?> clazz, String name) {
@@ -92,13 +98,14 @@ public class AsmBeanAccessor {
      * @return PropertyReader
      */
     public PropertyReader createReader(Class<?> clazz, String name) {
+        if (shouldUseFallback(clazz)) {
+            return fallback.createReader(clazz, name);
+        }
         try {
-
             Class<?> generatedClass = defineClass(createReaderCode(clazz, name));
             return (PropertyReader) generatedClass.getDeclaredConstructor().newInstance();
-
         } catch (Exception e) {
-            throw new RuntimeException("Failed to create PropertyReader for " + clazz.getName() + "." + name, e);
+            return fallback.createReader(clazz, name);
         }
     }
 
@@ -235,6 +242,9 @@ public class AsmBeanAccessor {
      * @return PropertyWriter
      */
     public PropertyWriter createWriter(Class<?> clazz, String name, TypeConverter typeConverter) {
+        if (shouldUseFallback(clazz)) {
+            return fallback.createWriter(clazz, name, typeConverter);
+        }
         try {
             PropertyDescriptor descriptor = findPropertyDescriptor(clazz, name);
             byte[] bytecode = createWriterCode(clazz,
@@ -252,10 +262,274 @@ public class AsmBeanAccessor {
                 return (PropertyWriter) generatedClass.getDeclaredConstructor(TypeConverter.class)
                         .newInstance(typeConverter);
             }
-
         } catch (Throwable e) {
-            throw new RuntimeException("Failed to create PropertyWriter for " + clazz.getName() + "." + name, e);
+            return fallback.createWriter(clazz, name, typeConverter);
         }
+    }
+
+    @Override
+    public PropertyTransfer createTransfer(Class<?> sourceClass,
+                                           String sourceName,
+                                           boolean sourcePrimitive,
+                                           Class<?> targetClass,
+                                           String targetName) {
+        if (shouldUseFallback(sourceClass, targetClass)) {
+            return fallback.createTransfer(sourceClass, sourceName, sourcePrimitive, targetClass, targetName);
+        }
+        try {
+            PropertyDescriptor sourceDescriptor = findPropertyDescriptor(sourceClass, sourceName);
+            PropertyDescriptor targetDescriptor = findPropertyDescriptor(targetClass, targetName);
+            if (sourceDescriptor == null
+                || sourceDescriptor.getReadMethod() == null
+                || targetDescriptor == null
+                || targetDescriptor.getWriteMethod() == null) {
+                return null;
+            }
+            byte[] bytecode = createTransferCode(sourceClass,
+                                                 sourceDescriptor,
+                                                 sourcePrimitive,
+                                                 targetClass,
+                                                 targetDescriptor);
+            Class<?> generatedClass = defineClass(bytecode);
+            return (PropertyTransfer) generatedClass.getDeclaredConstructor().newInstance();
+        } catch (Throwable e) {
+            return fallback.createTransfer(sourceClass, sourceName, sourcePrimitive, targetClass, targetName);
+        }
+    }
+
+    @Override
+    public ConverterPropertyTransfer createConverterTransfer(Class<?> sourceClass,
+                                                             String sourceName,
+                                                             boolean sourcePrimitive,
+                                                             Class<?> targetClass,
+                                                             String targetName,
+                                                             boolean allowDirectAssignment) {
+        if (shouldUseFallback(sourceClass, targetClass)) {
+            return fallback.createConverterTransfer(sourceClass,
+                                                    sourceName,
+                                                    sourcePrimitive,
+                                                    targetClass,
+                                                    targetName,
+                                                    allowDirectAssignment);
+        }
+        try {
+            PropertyDescriptor sourceDescriptor = findPropertyDescriptor(sourceClass, sourceName);
+            PropertyDescriptor targetDescriptor = findPropertyDescriptor(targetClass, targetName);
+            if (sourceDescriptor == null
+                || sourceDescriptor.getReadMethod() == null
+                || targetDescriptor == null
+                || targetDescriptor.getWriteMethod() == null) {
+                return null;
+            }
+            byte[] bytecode = createConverterTransferCode(sourceClass,
+                                                          sourceDescriptor,
+                                                          sourcePrimitive,
+                                                          targetClass,
+                                                          targetDescriptor,
+                                                          allowDirectAssignment);
+            Class<?> generatedClass = defineClass(bytecode);
+            Class<?>[] genericTypes = resolveGenericTypes(
+                ResolvableType.forMethodParameter(targetDescriptor.getWriteMethod(), 0, targetClass)
+            );
+            return (ConverterPropertyTransfer) generatedClass.getDeclaredConstructor(Class[].class)
+                .newInstance((Object) genericTypes);
+        } catch (Throwable e) {
+            return fallback.createConverterTransfer(sourceClass,
+                                                    sourceName,
+                                                    sourcePrimitive,
+                                                    targetClass,
+                                                    targetName,
+                                                    allowDirectAssignment);
+        }
+    }
+
+    public byte[] createTransferCode(Class<?> sourceClass,
+                                     PropertyDescriptor sourceDescriptor,
+                                     boolean sourcePrimitive,
+                                     Class<?> targetClass,
+                                     PropertyDescriptor targetDescriptor) {
+        if (sourceDescriptor == null || sourceDescriptor.getReadMethod() == null) {
+            throw new IllegalArgumentException("Property '" + sourceDescriptor + "' not found or not readable in class " + sourceClass.getName());
+        }
+        if (targetDescriptor == null || targetDescriptor.getWriteMethod() == null) {
+            throw new IllegalArgumentException("Property '" + targetDescriptor + "' not found or not writable in class " + targetClass.getName());
+        }
+
+        Method readMethod = sourceDescriptor.getReadMethod();
+        Method writeMethod = targetDescriptor.getWriteMethod();
+        Class<?> readType = readMethod.getReturnType();
+        Class<?> targetParamType = writeMethod.getParameterTypes()[0];
+        String className = generateClassName(sourceClass.getSimpleName()
+                                             + "$" + sourceDescriptor.getName()
+                                             + "$To$"
+                                             + targetClass.getSimpleName()
+                                             + "$" + targetDescriptor.getName()
+                                             + "$Transfer");
+
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, className, null, "java/lang/Object", new String[]{PROPERTY_TRANSFER_INTERNAL_NAME});
+
+        MethodVisitor constructor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        constructor.visitCode();
+        constructor.visitVarInsn(Opcodes.ALOAD, 0);
+        constructor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        constructor.visitInsn(Opcodes.RETURN);
+        constructor.visitMaxs(1, 1);
+        constructor.visitEnd();
+
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "transfer", "(Ljava/lang/Object;Ljava/lang/Object;)V", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(sourceClass));
+        mv.visitMethodInsn(readMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                           Type.getInternalName(readMethod.getDeclaringClass()),
+                           readMethod.getName(),
+                           Type.getMethodDescriptor(readMethod),
+                           readMethod.getDeclaringClass().isInterface());
+
+        Label returnLabel = new Label();
+        if (readType.isPrimitive()) {
+            mv.visitVarInsn(getStoreOpcode(readType), 3);
+            mv.visitVarInsn(Opcodes.ALOAD, 2);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetClass));
+            mv.visitVarInsn(getLoadOpcode(readType), 3);
+            adaptPrimitiveValueForTarget(mv, readType, targetParamType);
+        } else {
+            mv.visitVarInsn(Opcodes.ASTORE, 3);
+            if (!sourcePrimitive) {
+                mv.visitVarInsn(Opcodes.ALOAD, 3);
+                mv.visitJumpInsn(Opcodes.IFNULL, returnLabel);
+            }
+            mv.visitVarInsn(Opcodes.ALOAD, 2);
+            mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetClass));
+            mv.visitVarInsn(Opcodes.ALOAD, 3);
+            adaptReferenceValueForTarget(mv, targetParamType);
+        }
+
+        mv.visitMethodInsn(writeMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                           Type.getInternalName(writeMethod.getDeclaringClass()),
+                           writeMethod.getName(),
+                           Type.getMethodDescriptor(writeMethod),
+                           writeMethod.getDeclaringClass().isInterface());
+        mv.visitLabel(returnLabel);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    public byte[] createConverterTransferCode(Class<?> sourceClass,
+                                              PropertyDescriptor sourceDescriptor,
+                                              boolean sourcePrimitive,
+                                              Class<?> targetClass,
+                                              PropertyDescriptor targetDescriptor,
+                                              boolean allowDirectAssignment) {
+        if (sourceDescriptor == null || sourceDescriptor.getReadMethod() == null) {
+            throw new IllegalArgumentException("Property '" + sourceDescriptor + "' not found or not readable in class " + sourceClass.getName());
+        }
+        if (targetDescriptor == null || targetDescriptor.getWriteMethod() == null) {
+            throw new IllegalArgumentException("Property '" + targetDescriptor + "' not found or not writable in class " + targetClass.getName());
+        }
+
+        Method readMethod = sourceDescriptor.getReadMethod();
+        Method writeMethod = targetDescriptor.getWriteMethod();
+        Class<?> readType = readMethod.getReturnType();
+        Class<?> targetParamType = writeMethod.getParameterTypes()[0];
+        String className = generateClassName(sourceClass.getSimpleName()
+                                             + "$" + sourceDescriptor.getName()
+                                             + "$To$"
+                                             + targetClass.getSimpleName()
+                                             + "$" + targetDescriptor.getName()
+                                             + "$ConvertingTransfer");
+
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, className, null, "java/lang/Object", new String[]{CONVERTER_PROPERTY_TRANSFER_INTERNAL_NAME});
+        FieldVisitor genericTypesField = cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                                                       "genericTypes",
+                                                       "[Ljava/lang/Class;",
+                                                       null,
+                                                       null);
+        genericTypesField.visitEnd();
+
+        MethodVisitor constructor = cw.visitMethod(Opcodes.ACC_PUBLIC,
+                                                   "<init>",
+                                                   "([Ljava/lang/Class;)V",
+                                                   null,
+                                                   null);
+        constructor.visitCode();
+        constructor.visitVarInsn(Opcodes.ALOAD, 0);
+        constructor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        constructor.visitVarInsn(Opcodes.ALOAD, 0);
+        constructor.visitVarInsn(Opcodes.ALOAD, 1);
+        constructor.visitFieldInsn(Opcodes.PUTFIELD, className, "genericTypes", "[Ljava/lang/Class;");
+        constructor.visitInsn(Opcodes.RETURN);
+        constructor.visitMaxs(2, 2);
+        constructor.visitEnd();
+
+        generateTransferConvertMethod(cw,
+                                      className,
+                                      targetParamType,
+                                      allowDirectAssignment,
+                                      isNumberType(targetParamType));
+
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC,
+                                          "transfer",
+                                          "(Ljava/lang/Object;Ljava/lang/Object;L" + BEAN_CONVERTER_INTERNAL_NAME + ";)V",
+                                          null,
+                                          null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(sourceClass));
+        mv.visitMethodInsn(readMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                           Type.getInternalName(readMethod.getDeclaringClass()),
+                           readMethod.getName(),
+                           Type.getMethodDescriptor(readMethod),
+                           readMethod.getDeclaringClass().isInterface());
+
+        if (readType.isPrimitive()) {
+            boxPrimitive(mv, readType);
+        }
+        mv.visitVarInsn(Opcodes.ASTORE, 4);
+
+        Label returnLabel = new Label();
+        if (!sourcePrimitive) {
+            mv.visitVarInsn(Opcodes.ALOAD, 4);
+            mv.visitJumpInsn(Opcodes.IFNULL, returnLabel);
+        }
+
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ALOAD, 4);
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL,
+                           className,
+                           "convertValue",
+                           "(Ljava/lang/Object;L" + BEAN_CONVERTER_INTERNAL_NAME + ";)Ljava/lang/Object;",
+                           false);
+        mv.visitVarInsn(Opcodes.ASTORE, 4);
+
+        if (!targetParamType.isPrimitive()) {
+            mv.visitVarInsn(Opcodes.ALOAD, 4);
+            mv.visitJumpInsn(Opcodes.IFNULL, returnLabel);
+        }
+
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetClass));
+        mv.visitVarInsn(Opcodes.ALOAD, 4);
+        adaptReferenceValueForTarget(mv, targetParamType);
+        mv.visitMethodInsn(writeMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                           Type.getInternalName(writeMethod.getDeclaringClass()),
+                           writeMethod.getName(),
+                           Type.getMethodDescriptor(writeMethod),
+                           writeMethod.getDeclaringClass().isInterface());
+        mv.visitLabel(returnLabel);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
     }
 
     private PropertyDescriptor findPropertyDescriptor(Class<?> clazz, String name) {
@@ -291,6 +565,52 @@ public class AsmBeanAccessor {
                 "defineClass", String.class, byte[].class, int.class, int.class);
         defineClassMethod.setAccessible(true);
         return (Class<?>) defineClassMethod.invoke(classLoader, className.replace('/', '.'), bytes, 0, bytes.length);
+    }
+
+    private void adaptPrimitiveValueForTarget(MethodVisitor mv, Class<?> sourceType, Class<?> targetType) {
+        if (targetType.isPrimitive()) {
+            return;
+        }
+        boxPrimitive(mv, sourceType);
+        if (targetType != Object.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetType));
+        }
+    }
+
+    private void adaptReferenceValueForTarget(MethodVisitor mv, Class<?> targetType) {
+        if (targetType.isPrimitive()) {
+            unboxPrimitive(mv, targetType);
+            return;
+        }
+        if (targetType != Object.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetType));
+        }
+    }
+
+    private int getStoreOpcode(Class<?> type) {
+        if (type == long.class) {
+            return Opcodes.LSTORE;
+        }
+        if (type == float.class) {
+            return Opcodes.FSTORE;
+        }
+        if (type == double.class) {
+            return Opcodes.DSTORE;
+        }
+        return Opcodes.ISTORE;
+    }
+
+    private int getLoadOpcode(Class<?> type) {
+        if (type == long.class) {
+            return Opcodes.LLOAD;
+        }
+        if (type == float.class) {
+            return Opcodes.FLOAD;
+        }
+        if (type == double.class) {
+            return Opcodes.DLOAD;
+        }
+        return Opcodes.ILOAD;
     }
 
     private void boxPrimitive(MethodVisitor mv, Class<?> primitiveType) {
@@ -360,6 +680,122 @@ public class AsmBeanAccessor {
             return Character.class;
         }
         return primitiveType;
+    }
+
+    private void generateTransferConvertMethod(ClassWriter cw,
+                                               String className,
+                                               Class<?> paramType,
+                                               boolean allowDirectAssignment,
+                                               boolean enumDictToNumber) {
+        MethodVisitor convertMv = cw.visitMethod(Opcodes.ACC_PRIVATE,
+                                                 "convertValue",
+                                                 "(Ljava/lang/Object;L" + BEAN_CONVERTER_INTERNAL_NAME + ";)Ljava/lang/Object;",
+                                                 null,
+                                                 null);
+        convertMv.visitCode();
+
+        Label convertLabel = new Label();
+
+        if (enumDictToNumber) {
+            convertMv.visitVarInsn(Opcodes.ALOAD, 1);
+            convertMv.visitTypeInsn(Opcodes.INSTANCEOF, "org/hswebframework/web/dict/EnumDict");
+            Label skipEnumDictUnwrapLabel = new Label();
+            convertMv.visitJumpInsn(Opcodes.IFEQ, skipEnumDictUnwrapLabel);
+
+            convertMv.visitVarInsn(Opcodes.ALOAD, 1);
+            convertMv.visitTypeInsn(Opcodes.CHECKCAST, "org/hswebframework/web/dict/EnumDict");
+            convertMv.visitMethodInsn(Opcodes.INVOKEINTERFACE,
+                                      "org/hswebframework/web/dict/EnumDict",
+                                      "getValue",
+                                      "()Ljava/lang/Object;",
+                                      true);
+            convertMv.visitVarInsn(Opcodes.ASTORE, 3);
+            convertMv.visitVarInsn(Opcodes.ALOAD, 3);
+            Label skipNullEnumValueLabel = new Label();
+            convertMv.visitJumpInsn(Opcodes.IFNULL, skipNullEnumValueLabel);
+            convertMv.visitVarInsn(Opcodes.ALOAD, 3);
+            convertMv.visitVarInsn(Opcodes.ASTORE, 1);
+            convertMv.visitLabel(skipNullEnumValueLabel);
+            convertMv.visitLabel(skipEnumDictUnwrapLabel);
+        }
+
+        if (allowDirectAssignment) {
+            convertMv.visitVarInsn(Opcodes.ALOAD, 1);
+            if (paramType.isPrimitive()) {
+                Class<?> wrapperType = getWrapperType(paramType);
+                convertMv.visitTypeInsn(Opcodes.INSTANCEOF, Type.getInternalName(wrapperType));
+            } else {
+                convertMv.visitTypeInsn(Opcodes.INSTANCEOF, Type.getInternalName(paramType));
+            }
+            convertMv.visitJumpInsn(Opcodes.IFEQ, convertLabel);
+            convertMv.visitVarInsn(Opcodes.ALOAD, 1);
+            convertMv.visitInsn(Opcodes.ARETURN);
+        }
+
+        convertMv.visitLabel(convertLabel);
+        convertMv.visitVarInsn(Opcodes.ALOAD, 2);
+        convertMv.visitVarInsn(Opcodes.ALOAD, 1);
+        convertMv.visitLdcInsn(Type.getType(paramType));
+        convertMv.visitVarInsn(Opcodes.ALOAD, 0);
+        convertMv.visitFieldInsn(Opcodes.GETFIELD, className, "genericTypes", "[Ljava/lang/Class;");
+        convertMv.visitMethodInsn(Opcodes.INVOKEINTERFACE,
+                                  BEAN_CONVERTER_INTERNAL_NAME,
+                                  "convert",
+                                  "(Ljava/lang/Object;Ljava/lang/Class;[Ljava/lang/Class;)Ljava/lang/Object;",
+                                  true);
+        convertMv.visitInsn(Opcodes.ARETURN);
+        convertMv.visitMaxs(0, 0);
+        convertMv.visitEnd();
+    }
+
+    private static boolean isNumberType(Class<?> targetType) {
+        return Number.class.isAssignableFrom(targetType)
+            || (targetType.isPrimitive() && targetType != boolean.class && targetType != char.class);
+    }
+
+    private static Class<?>[] resolveGenericTypes(ResolvableType type) {
+        Class<?>[] arr = java.util.Arrays.stream(type.getGenerics())
+            .map(ResolvableType::getRawClass)
+            .filter(java.util.Objects::nonNull)
+            .toArray(Class[]::new);
+        return arr.length == 0 ? FastBeanCopierSupport.EMPTY_CLASS_ARRAY : arr;
+    }
+
+    private boolean shouldUseFallback(Class<?>... types) {
+        java.util.Map<String, Class<?>> names = new java.util.HashMap<>();
+        for (Class<?> type : types) {
+            Class<?> actualType = normalizeType(type);
+            if (actualType.isPrimitive()) {
+                continue;
+            }
+            Class<?> exists = names.putIfAbsent(actualType.getName(), actualType);
+            if (exists != null && exists != actualType) {
+                return true;
+            }
+            if (!isTypeVisible(actualType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Class<?> normalizeType(Class<?> type) {
+        while (type.isArray()) {
+            type = type.getComponentType();
+        }
+        return type;
+    }
+
+    private boolean isTypeVisible(Class<?> type) {
+        ClassLoader loader = type.getClassLoader();
+        if (loader == null || loader == ACCESSOR_CLASS_LOADER) {
+            return true;
+        }
+        try {
+            return Class.forName(type.getName(), false, ACCESSOR_CLASS_LOADER) == type;
+        } catch (Throwable ignore) {
+            return false;
+        }
     }
 
     /**

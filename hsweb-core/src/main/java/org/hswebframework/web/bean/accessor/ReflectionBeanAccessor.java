@@ -1,7 +1,8 @@
 package org.hswebframework.web.bean.accessor;
 
 import lombok.SneakyThrows;
-import org.springframework.cglib.core.ReflectUtils;
+import org.hswebframework.web.bean.Converter;
+import org.hswebframework.web.dict.EnumDict;
 import org.springframework.core.ResolvableType;
 
 import java.beans.BeanInfo;
@@ -9,11 +10,9 @@ import java.beans.Introspector;
 import java.beans.PropertyDescriptor;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 基于反射的Bean属性访问器
@@ -26,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * @author AI Assistant
  */
-public class ReflectionBeanAccessor {
+public class ReflectionBeanAccessor implements PropertyAccessor {
 
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
 
@@ -51,6 +50,61 @@ public class ReflectionBeanAccessor {
      */
     public PropertyWriter createWriter(Class<?> clazz, String name, TypeConverter typeConverter) {
         return createWriterInternal(clazz, name, typeConverter);
+    }
+
+    @Override
+    public PropertyTransfer createTransfer(Class<?> sourceClass,
+                                           String sourceName,
+                                           boolean sourcePrimitive,
+                                           Class<?> targetClass,
+                                           String targetName) {
+        try {
+            PropertyDescriptor sourceDescriptor = findPropertyDescriptor(sourceClass, sourceName);
+            PropertyDescriptor targetDescriptor = findPropertyDescriptor(targetClass, targetName);
+            if (sourceDescriptor == null
+                || sourceDescriptor.getReadMethod() == null
+                || targetDescriptor == null
+                || targetDescriptor.getWriteMethod() == null) {
+                return null;
+            }
+            MethodHandle getter = LOOKUP.unreflect(sourceDescriptor.getReadMethod());
+            MethodHandle setter = LOOKUP.unreflect(targetDescriptor.getWriteMethod());
+            return new MethodHandlePropertyTransfer(getter, setter, sourcePrimitive);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @Override
+    public ConverterPropertyTransfer createConverterTransfer(Class<?> sourceClass,
+                                                             String sourceName,
+                                                             boolean sourcePrimitive,
+                                                             Class<?> targetClass,
+                                                             String targetName,
+                                                             boolean allowDirectAssignment) {
+        try {
+            PropertyDescriptor sourceDescriptor = findPropertyDescriptor(sourceClass, sourceName);
+            PropertyDescriptor targetDescriptor = findPropertyDescriptor(targetClass, targetName);
+            if (sourceDescriptor == null
+                || sourceDescriptor.getReadMethod() == null
+                || targetDescriptor == null
+                || targetDescriptor.getWriteMethod() == null) {
+                return null;
+            }
+            Method setter = targetDescriptor.getWriteMethod();
+            MethodHandle getter = LOOKUP.unreflect(sourceDescriptor.getReadMethod());
+            MethodHandle writer = LOOKUP.unreflect(setter);
+            ResolvableType targetType = ResolvableType.forMethodParameter(setter, 0, targetClass);
+            Class<?>[] genericTypes = resolveGenericTypes(targetType);
+            return new MethodHandleConverterPropertyTransfer(getter,
+                                                             writer,
+                                                             sourcePrimitive,
+                                                             targetType.toClass(),
+                                                             genericTypes,
+                                                             allowDirectAssignment);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -190,6 +244,98 @@ public class ReflectionBeanAccessor {
         }
     }
 
+    private static class MethodHandlePropertyTransfer implements PropertyTransfer {
+        private final MethodHandle reader;
+        private final MethodHandle writer;
+        private final boolean sourcePrimitive;
+
+        private MethodHandlePropertyTransfer(MethodHandle reader, MethodHandle writer, boolean sourcePrimitive) {
+            this.reader = reader;
+            this.writer = writer;
+            this.sourcePrimitive = sourcePrimitive;
+        }
+
+        @Override
+        @SneakyThrows
+        public void transfer(Object source, Object target) {
+            Object value = reader.invoke(source);
+            if (value == null && !sourcePrimitive) {
+                return;
+            }
+            writer.invoke(target, value);
+        }
+    }
+
+    private static class MethodHandleConverterPropertyTransfer implements ConverterPropertyTransfer {
+        private final MethodHandle reader;
+        private final MethodHandle writer;
+        private final boolean sourcePrimitive;
+        private final boolean targetPrimitive;
+        private final boolean allowDirectAssignment;
+        private final Class<?> targetType;
+        private final Class<?>[] genericTypes;
+
+        private MethodHandleConverterPropertyTransfer(MethodHandle reader,
+                                                     MethodHandle writer,
+                                                     boolean sourcePrimitive,
+                                                     Class<?> targetType,
+                                                     Class<?>[] genericTypes,
+                                                     boolean allowDirectAssignment) {
+            this.reader = reader;
+            this.writer = writer;
+            this.sourcePrimitive = sourcePrimitive;
+            this.targetPrimitive = targetType.isPrimitive();
+            this.allowDirectAssignment = allowDirectAssignment;
+            this.targetType = targetType;
+            this.genericTypes = genericTypes;
+        }
+
+        @Override
+        @SneakyThrows
+        public void transfer(Object source, Object target, Converter converter) {
+            Object value = reader.invoke(source);
+            if (value == null && !sourcePrimitive) {
+                return;
+            }
+            if (value instanceof EnumDict && isNumberType(targetType)) {
+                Object enumValue = ((EnumDict<?>) value).getValue();
+                if (enumValue != null) {
+                    value = enumValue;
+                }
+            }
+            if (!allowDirectAssignment || !isDirectAssignable(value)) {
+                value = converter.convert(value, targetType, genericTypes);
+            }
+            if (value == null && !targetPrimitive) {
+                return;
+            }
+            writer.invoke(target, value);
+        }
+
+        private boolean isDirectAssignable(Object value) {
+            if (value == null) {
+                return false;
+            }
+            if (targetPrimitive) {
+                return resolveWrapperType(targetType).isInstance(value);
+            }
+            return targetType.isInstance(value);
+        }
+    }
+
+    private static boolean isNumberType(Class<?> targetType) {
+        return Number.class.isAssignableFrom(targetType)
+            || (targetType.isPrimitive() && targetType != boolean.class && targetType != char.class);
+    }
+
+    private static Class<?>[] resolveGenericTypes(ResolvableType type) {
+        Class<?>[] arr = java.util.Arrays.stream(type.getGenerics())
+            .map(ResolvableType::getRawClass)
+            .filter(java.util.Objects::nonNull)
+            .toArray(Class[]::new);
+        return arr.length == 0 ? org.hswebframework.web.bean.FastBeanCopierSupport.EMPTY_CLASS_ARRAY : arr;
+    }
+
     /**
      * 基于MethodHandle的PropertyWriter实现
      */
@@ -215,7 +361,18 @@ public class ReflectionBeanAccessor {
         }
 
         private Object convertValue(Object value) {
-            if (value == null || paramType.isInstance(value)) {
+            if (value == null) {
+                return value;
+            }
+            if (paramType.isPrimitive()) {
+                Class<?> wrapperType = resolveWrapperType(paramType);
+                if (wrapperType.isInstance(value)) {
+                    return value;
+                }
+            } else if (paramType.isInstance(value)) {
+                return value;
+            }
+            if (typeConverter == null) {
                 return value;
             }
             return typeConverter.convert(value, resolvableType);
@@ -250,7 +407,18 @@ public class ReflectionBeanAccessor {
         }
 
         private Object convertValue(Object value) {
-            if (value == null || field.getType().isInstance(value)) {
+            if (value == null) {
+                return value;
+            }
+            if (field.getType().isPrimitive()) {
+                Class<?> wrapperType = resolveWrapperType(field.getType());
+                if (wrapperType.isInstance(value)) {
+                    return value;
+                }
+            } else if (field.getType().isInstance(value)) {
+                return value;
+            }
+            if (typeConverter == null) {
                 return value;
             }
             return typeConverter.convert(value, resolvableType);
@@ -302,11 +470,50 @@ public class ReflectionBeanAccessor {
         }
 
         private Object convertValue(Object value) {
-            if (value == null || field.getType().isInstance(value)) {
+            if (value == null) {
                 return null;
+            }
+            if (field.getType().isPrimitive()) {
+                Class<?> wrapperType = resolveWrapperType(field.getType());
+                if (wrapperType.isInstance(value)) {
+                    return value;
+                }
+            } else if (field.getType().isInstance(value)) {
+                return value;
+            }
+            if (typeConverter == null) {
+                return value;
             }
             return typeConverter.convert(value, fieldType);
         }
 
     }
-} 
+
+    private static Class<?> resolveWrapperType(Class<?> primitiveType) {
+        if (primitiveType == boolean.class) {
+            return Boolean.class;
+        }
+        if (primitiveType == byte.class) {
+            return Byte.class;
+        }
+        if (primitiveType == short.class) {
+            return Short.class;
+        }
+        if (primitiveType == int.class) {
+            return Integer.class;
+        }
+        if (primitiveType == long.class) {
+            return Long.class;
+        }
+        if (primitiveType == float.class) {
+            return Float.class;
+        }
+        if (primitiveType == double.class) {
+            return Double.class;
+        }
+        if (primitiveType == char.class) {
+            return Character.class;
+        }
+        return primitiveType;
+    }
+}
