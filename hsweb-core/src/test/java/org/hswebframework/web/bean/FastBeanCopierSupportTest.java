@@ -51,7 +51,11 @@ public class FastBeanCopierSupportTest {
         Source source = new Source();
         Target target = new Target();
 
-        Assert.assertSame(FastBeanCopierSupport.DEFAULT_CONVERT, FastBeanCopier.DEFAULT_CONVERT);
+        Assert.assertNotSame(FastBeanCopierSupport.DEFAULT_CONVERT, FastBeanCopier.DEFAULT_CONVERT);
+        Assert.assertEquals(
+            FastBeanCopierSupport.DEFAULT_CONVERT.convert("123", Integer.class, FastBeanCopierSupport.EMPTY_CLASS_ARRAY),
+            FastBeanCopier.DEFAULT_CONVERT.convert("123", Integer.class, FastBeanCopier.EMPTY_CLASS_ARRAY)
+        );
         Assert.assertSame(FastBeanCopierSupport.getBackend(), FastBeanCopier.getBackend());
         Assert.assertTrue(FastBeanCopierSupport.getBackend() instanceof JavassistFastBeanCopierBackend);
         Assert.assertSame(

@@ -11,7 +11,11 @@ public final class FastBeanCopier {
     @SuppressWarnings("all")
     public static final Class[] EMPTY_CLASS_ARRAY = FastBeanCopierSupport.EMPTY_CLASS_ARRAY;
 
-    public static final FastBeanCopierSupport.DefaultConverter DEFAULT_CONVERT = FastBeanCopierSupport.DEFAULT_CONVERT;
+    /**
+     * @deprecated 请改用 {@link FastBeanCopierSupport#DEFAULT_CONVERT}
+     */
+    @Deprecated
+    public static final DefaultConverter DEFAULT_CONVERT = new DefaultConverter();
 
     private FastBeanCopier() {
     }
@@ -76,5 +80,27 @@ public final class FastBeanCopier {
 
     public static Copier createCopier(Class<?> source, Class<?> target) {
         return FastBeanCopierSupport.createCopier(source, target);
+    }
+
+    /**
+     * @deprecated 请改用 {@link FastBeanCopierSupport.DefaultConverter}
+     */
+    @Deprecated
+    public static class DefaultConverter implements Converter {
+        DefaultConverter() {
+        }
+
+        public void setBeanFactory(BeanFactory beanFactory) {
+            FastBeanCopierSupport.DEFAULT_CONVERT.setBeanFactory(beanFactory);
+        }
+
+        public java.util.Collection<?> newCollection(Class<?> targetClass) {
+            return FastBeanCopierSupport.DEFAULT_CONVERT.newCollection(targetClass);
+        }
+
+        @Override
+        public <T> T convert(Object source, Class<T> targetClass, Class[] genericType) {
+            return FastBeanCopierSupport.DEFAULT_CONVERT.convert(source, targetClass, genericType);
+        }
     }
 }
