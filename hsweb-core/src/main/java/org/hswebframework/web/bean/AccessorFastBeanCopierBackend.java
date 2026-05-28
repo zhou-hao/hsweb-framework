@@ -63,6 +63,10 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
     static final class AccessorCopier implements Copier {
         private final NamedPropertyTransfer[] transfers;
         private final ExtensionTransfer[] extensionTransfers;
+        private final Map<String, NamedPropertyTransfer> sourceMapTransfers;
+        private final boolean sourceIsMap;
+        private final PropertyTransfer[] fastAccessorTransfers;
+        private final boolean fastAccessorMode;
 
         AccessorCopier(Class<?> source, Class<?> target, PropertyAccessor propertyAccessor) {
             Map<String, FastBeanCopierPropertySupport.ClassProperty> sourceProperties = null;
@@ -90,6 +94,8 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
 
             List<NamedPropertyTransfer> mappings = new ArrayList<>(sourceProperties.size());
             List<ExtensionTransfer> extensionMappings = new ArrayList<>();
+            List<PropertyTransfer> fastTransfers = new ArrayList<>(sourceProperties.size());
+            boolean accessorOnly = !sourceIsMap && !targetIsMap && !targetIsExtendable;
             for (FastBeanCopierPropertySupport.ClassProperty sourceProperty : sourceProperties.values()) {
                 FastBeanCopierPropertySupport.ClassProperty targetProperty = targetProperties.get(sourceProperty.getName());
                 if (targetProperty == null) {
@@ -100,15 +106,40 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
                 }
                 NamedPropertyTransfer transfer = NamedPropertyTransfer.of(target, sourceProperty, targetProperty, propertyAccessor);
                 mappings.add(transfer);
+                if (accessorOnly && transfer instanceof AccessorPropertyTransfer) {
+                    fastTransfers.add(((AccessorPropertyTransfer) transfer).transfer);
+                } else {
+                    accessorOnly = false;
+                }
             }
             this.transfers = mappings.toArray(new NamedPropertyTransfer[0]);
             this.extensionTransfers = extensionMappings.toArray(new ExtensionTransfer[0]);
+            this.sourceIsMap = sourceIsMap;
+            this.fastAccessorMode = accessorOnly && !fastTransfers.isEmpty() && fastTransfers.size() == mappings.size();
+            this.fastAccessorTransfers = fastAccessorMode
+                ? fastTransfers.toArray(new PropertyTransfer[0])
+                : null;
+            if (sourceIsMap) {
+                Map<String, NamedPropertyTransfer> transferIndex = new HashMap<>(mappings.size());
+                for (NamedPropertyTransfer transfer : mappings) {
+                    transferIndex.put(transfer.name, transfer);
+                }
+                this.sourceMapTransfers = transferIndex;
+            } else {
+                this.sourceMapTransfers = Collections.emptyMap();
+            }
         }
 
         @Override
         public void copy(Object source, Object target, Set<String> ignore, Converter converter) {
             try {
-                if (ignore.isEmpty()) {
+                if (sourceIsMap) {
+                    if (ignore.isEmpty()) {
+                        copyMapWithoutIgnore((Map<?, ?>) source, target, converter);
+                    } else {
+                        copyMapWithIgnore((Map<?, ?>) source, target, ignore, converter);
+                    }
+                } else if (ignore.isEmpty()) {
                     copyWithoutIgnore(source, target, converter);
                 } else {
                     copyWithIgnore(source, target, ignore, converter);
@@ -121,6 +152,12 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
         }
 
         private void copyWithoutIgnore(Object source, Object target, Converter converter) throws Throwable {
+            if (fastAccessorMode) {
+                for (PropertyTransfer transfer : fastAccessorTransfers) {
+                    transfer.transfer(source, target);
+                }
+                return;
+            }
             for (NamedPropertyTransfer transfer : transfers) {
                 transfer.transfer(source, target, converter);
             }
@@ -143,6 +180,28 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
                 }
             }
         }
+
+        private void copyMapWithoutIgnore(Map<?, ?> source, Object target, Converter converter) throws Throwable {
+            for (Map.Entry<?, ?> entry : source.entrySet()) {
+                NamedPropertyTransfer transfer = sourceMapTransfers.get(String.valueOf(entry.getKey()));
+                if (transfer != null) {
+                    transfer.transferValue(entry.getValue(), target, converter);
+                }
+            }
+        }
+
+        private void copyMapWithIgnore(Map<?, ?> source, Object target, Set<String> ignore, Converter converter) throws Throwable {
+            for (Map.Entry<?, ?> entry : source.entrySet()) {
+                String name = String.valueOf(entry.getKey());
+                if (ignore.contains(name)) {
+                    continue;
+                }
+                NamedPropertyTransfer transfer = sourceMapTransfers.get(name);
+                if (transfer != null) {
+                    transfer.transferValue(entry.getValue(), target, converter);
+                }
+            }
+        }
     }
 
     abstract static class NamedPropertyTransfer {
@@ -160,6 +219,10 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
 
         abstract void transfer(Object source, Object target, Converter converter) throws Throwable;
 
+        void transferValue(Object value, Object target, Converter converter) throws Throwable {
+            throw new UnsupportedOperationException("transferValue is only supported for map source transfers");
+        }
+
         static NamedPropertyTransfer of(Class<?> target,
                                         FastBeanCopierPropertySupport.ClassProperty sourceProperty,
                                         FastBeanCopierPropertySupport.ClassProperty targetProperty,
@@ -169,6 +232,29 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
             boolean sourcePrimitive = sourceProperty.isPrimitive();
             boolean targetPrimitive = targetProperty.isPrimitive();
             Class<?>[] genericTypes = resolveGenericTypes(target, targetProperty);
+
+            if (Map.class.isAssignableFrom(sourceProperty.getBeanType())) {
+                ValueWriter writer = createWriter(targetProperty, propertyAccessor);
+                if (targetType == Object.class) {
+                    return new MapDirectPropertyTransfer(sourceProperty.getName(), writer, targetPrimitive);
+                }
+                if (requiresGenericConversion(targetType, genericTypes)) {
+                    return new MapConvertingPropertyTransfer(sourceProperty.getName(),
+                                                             writer,
+                                                             targetPrimitive,
+                                                             targetType,
+                                                             genericTypes,
+                                                             isNumberType(targetType),
+                                                             true);
+                }
+                return new MapConvertingPropertyTransfer(sourceProperty.getName(),
+                                                         writer,
+                                                         targetPrimitive,
+                                                         targetType,
+                                                         genericTypes,
+                                                         isNumberType(targetType),
+                                                         true);
+            }
 
             PropertyTransfer accessorTransfer = createAccessorTransfer(sourceProperty,
                                                                       targetProperty,
@@ -394,6 +480,93 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
         }
     }
 
+    static final class MapDirectPropertyTransfer extends NamedPropertyTransfer {
+        private final ValueWriter writer;
+        private final boolean targetPrimitive;
+
+        MapDirectPropertyTransfer(String name, ValueWriter writer, boolean targetPrimitive) {
+            super(name);
+            this.writer = writer;
+            this.targetPrimitive = targetPrimitive;
+        }
+
+        @Override
+        void transfer(Object source, Object target, Converter converter) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        void transferValue(Object value, Object target, Converter converter) throws Throwable {
+            if (value == null && !targetPrimitive) {
+                return;
+            }
+            writer.write(target, value);
+        }
+    }
+
+    static final class MapConvertingPropertyTransfer extends NamedPropertyTransfer {
+        private final ValueWriter writer;
+        private final boolean targetPrimitive;
+        private final Class<?> targetType;
+        private final Class<?>[] genericTypes;
+        private final boolean unwrapEnumDictNumber;
+        private final boolean allowDirectAssignable;
+        private final boolean beanLikeTarget;
+
+        MapConvertingPropertyTransfer(String name,
+                                      ValueWriter writer,
+                                      boolean targetPrimitive,
+                                      Class<?> targetType,
+                                      Class<?>[] genericTypes,
+                                      boolean unwrapEnumDictNumber,
+                                      boolean allowDirectAssignable) {
+            super(name);
+            this.writer = writer;
+            this.targetPrimitive = targetPrimitive;
+            this.targetType = targetType;
+            this.genericTypes = genericTypes;
+            this.unwrapEnumDictNumber = unwrapEnumDictNumber;
+            this.allowDirectAssignable = allowDirectAssignable;
+            this.beanLikeTarget = isBeanLikeTarget(targetType);
+        }
+
+        @Override
+        void transfer(Object source, Object target, Converter converter) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        void transferValue(Object value, Object target, Converter converter) throws Throwable {
+            if (value == null && !targetPrimitive) {
+                return;
+            }
+            if (unwrapEnumDictNumber && value instanceof EnumDict) {
+                Object enumValue = ((EnumDict<?>) value).getValue();
+                if (enumValue != null) {
+                    value = enumValue;
+                }
+            }
+            if (allowDirectAssignable && isDirectAssignable(targetType, value)) {
+                writer.write(target, value);
+                return;
+            }
+            if (beanLikeTarget && value instanceof Map) {
+                Object nested = FastBeanCopierSupport.copy(value,
+                                                           FastBeanCopierSupport.getBeanFactory().newInstance(targetType),
+                                                           converter,
+                                                           Collections.emptySet());
+                writer.write(target, nested);
+                return;
+            }
+            Object converted = converter.convert(value, (Class) targetType, genericTypes);
+            if (converted == null && !targetPrimitive) {
+                return;
+            }
+            writer.write(target, converted);
+        }
+    }
+
     static final class CloneablePropertyTransfer extends ReaderWriterPropertyTransfer {
         private final Class<?> targetType;
         private final Class<?>[] genericTypes;
@@ -438,6 +611,7 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
         private final Class<?>[] genericTypes;
         private final boolean unwrapEnumDictNumber;
         private final boolean allowDirectAssignable;
+        private final boolean beanLikeTarget;
 
         ConvertingPropertyTransfer(String name,
                                    ValueReader reader,
@@ -454,6 +628,7 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
             this.genericTypes = genericTypes;
             this.unwrapEnumDictNumber = unwrapEnumDictNumber;
             this.allowDirectAssignable = allowDirectAssignable;
+            this.beanLikeTarget = isBeanLikeTarget(targetType);
         }
 
         @Override
@@ -471,6 +646,14 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
             }
             if (allowDirectAssignable && isDirectAssignable(targetType, value)) {
                 writer.write(target, value);
+                return;
+            }
+            if (beanLikeTarget && value instanceof Map) {
+                Object nested = FastBeanCopierSupport.copy(value,
+                                                           FastBeanCopierSupport.getBeanFactory().newInstance(targetType),
+                                                           converter,
+                                                           Collections.emptySet());
+                writer.write(target, nested);
                 return;
             }
             Object converted = converter.convert(value, (Class) targetType, genericTypes);
@@ -542,6 +725,22 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
         return targetType.isPrimitive()
             && targetType != boolean.class
             && targetType != char.class;
+    }
+
+    private static boolean isBeanLikeTarget(Class<?> targetType) {
+        return targetType != Object.class
+            && targetType != String.class
+            && targetType != CharSequence.class
+            && targetType != Date.class
+            && targetType != Boolean.class
+            && targetType != Character.class
+            && targetType != boolean.class
+            && targetType != char.class
+            && !targetType.isEnum()
+            && !targetType.isArray()
+            && !Collection.class.isAssignableFrom(targetType)
+            && !Map.class.isAssignableFrom(targetType)
+            && !isNumberType(targetType);
     }
 
     private static Object tryClone(Object value) {

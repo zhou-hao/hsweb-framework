@@ -55,6 +55,26 @@ public class FastBeanCopierJmhBenchmark {
     }
 
     @Benchmark
+    public void copyConversionHeavyMapToBean(BenchmarkState state, Blackhole blackhole) {
+        blackhole.consume(FastBeanCopierSupport.copy(state.conversionHeavyMap, new Target()));
+    }
+
+    @Benchmark
+    public void copyCollectionHeavyMapToBean(BenchmarkState state, Blackhole blackhole) {
+        blackhole.consume(FastBeanCopierSupport.copy(state.collectionHeavyMap, new Target()));
+    }
+
+    @Benchmark
+    public void copyNestedHeavyMapToBean(BenchmarkState state, Blackhole blackhole) {
+        blackhole.consume(FastBeanCopierSupport.copy(state.nestedHeavyMap, new Target()));
+    }
+
+    @Benchmark
+    public void copyNestedHeavyMapToBeanOnly(BenchmarkState state, Blackhole blackhole) {
+        blackhole.consume(FastBeanCopierSupport.copy(state.nestedOnlyMap, new NestedOnlyTarget()));
+    }
+
+    @Benchmark
     public void copyBeanToExtendable(BenchmarkState state, Blackhole blackhole) {
         blackhole.consume(FastBeanCopierSupport.copy(state.complexSource, new BenchmarkExtendableEntity()));
     }
@@ -73,6 +93,10 @@ public class FastBeanCopierJmhBenchmark {
         private SimpleSource simpleSource;
         private Source complexSource;
         private Map<String, Object> heterogeneousMap;
+        private Map<String, Object> conversionHeavyMap;
+        private Map<String, Object> collectionHeavyMap;
+        private Map<String, Object> nestedHeavyMap;
+        private Map<String, Object> nestedOnlyMap;
         private BenchmarkExtendableEntity extendableSource;
 
         @Setup(Level.Trial)
@@ -84,6 +108,10 @@ public class FastBeanCopierJmhBenchmark {
             simpleSource = createSimpleSource();
             complexSource = createComplexSource();
             heterogeneousMap = createHeterogeneousMap();
+            conversionHeavyMap = createConversionHeavyMap();
+            collectionHeavyMap = createCollectionHeavyMap();
+            nestedHeavyMap = createNestedHeavyMap();
+            nestedOnlyMap = createNestedOnlyMap();
             extendableSource = FastBeanCopierSupport.copy(complexSource, new BenchmarkExtendableEntity());
 
             warmupCache();
@@ -99,6 +127,10 @@ public class FastBeanCopierJmhBenchmark {
             FastBeanCopierSupport.copy(complexSource, new Target());
             FastBeanCopierSupport.copy(complexSource, new HashMap<>());
             FastBeanCopierSupport.copy(heterogeneousMap, new Target());
+            FastBeanCopierSupport.copy(conversionHeavyMap, new Target());
+            FastBeanCopierSupport.copy(collectionHeavyMap, new Target());
+            FastBeanCopierSupport.copy(nestedHeavyMap, new Target());
+            FastBeanCopierSupport.copy(nestedOnlyMap, new NestedOnlyTarget());
             FastBeanCopierSupport.copy(complexSource, new BenchmarkExtendableEntity());
             FastBeanCopierSupport.copy(extendableSource, new HashMap<>());
         }
@@ -217,6 +249,147 @@ public class FastBeanCopierJmhBenchmark {
             map.put("colors", Arrays.asList("BLUE", "RED"));
             return map;
         }
+
+        private Map<String, Object> createConversionHeavyMap() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("name", 123456);
+            map.put("ids", "alpha,beta,gamma");
+            map.put("boy", "true");
+            map.put("boy2", 1);
+            map.put("boy3", false);
+            map.put("age", "2048");
+            map.put("age2", 4096L);
+            map.put("age3", 8192);
+            map.put("deleteTime", "2024-05-07 10:20:30");
+            map.put("createTime", new Date(1715043600000L));
+            map.put("updateTime", "2024-05-08 11:30:40");
+            map.put("nestObject", new LinkedHashMap<String, Object>() {{
+                put("name", 1001);
+                put("age", "28");
+                put("password", "1234567");
+            }});
+            map.put("nestObject2", new LinkedHashMap<String, Object>() {{
+                put("name", "map-nest-2");
+                put("age", "29");
+            }});
+            map.put("nestObject3", new LinkedHashMap<String, Object>() {{
+                put("name", "map-nest-3");
+                put("age", 30);
+                put("password", "7654321");
+            }});
+            map.put("nestObjects", Arrays.asList(
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "list-nest-1");
+                    put("age", "31");
+                    put("password", "1234567");
+                }},
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "list-nest-2");
+                    put("age", 32);
+                    put("password", "7654321");
+                }}
+            ));
+            map.put("color", Color.RED);
+            map.put("color2", Color.RED.getText());
+            map.put("color3", "BLUE");
+            map.put("arr", "51,52");
+            map.put("arr2", new String[]{"53", "54"});
+            map.put("arr3", Arrays.asList("55", "56"));
+            map.put("arr4", new String[]{"57", "58"});
+            map.put("arr7", Arrays.asList("59", "60"));
+            map.put("arr8", new int[]{61, 62});
+            map.put("colors", new String[]{"BLUE", "RED"});
+            return map;
+        }
+
+        private Map<String, Object> createCollectionHeavyMap() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("name", "collection-heavy");
+            map.put("ids", Arrays.asList("alpha", "beta"));
+            map.put("arr", new String[]{"1", "2"});
+            map.put("arr2", Arrays.asList("3", "4"));
+            map.put("arr3", Arrays.asList(5, 6));
+            map.put("arr4", Arrays.asList(7, 8));
+            map.put("arr7", new long[]{9L, 10L});
+            map.put("arr8", Arrays.asList(11, 12));
+            map.put("colors", new Color[]{Color.BLUE, Color.RED});
+            return map;
+        }
+
+        private Map<String, Object> createNestedHeavyMap() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("name", "nested-heavy");
+            map.put("nestObject", new LinkedHashMap<String, Object>() {{
+                put("name", "nest-root");
+                put("age", "31");
+                put("password", "1234567");
+            }});
+            map.put("nestObject2", new LinkedHashMap<String, Object>() {{
+                put("name", "nest-map");
+                put("age", 32);
+            }});
+            map.put("nestObject3", new LinkedHashMap<String, Object>() {{
+                put("name", "nest-tail");
+                put("age", "33");
+                put("password", "7654321");
+            }});
+            map.put("nestObjects", Arrays.asList(
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "nest-list-1");
+                    put("age", "34");
+                    put("password", "1234567");
+                }},
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "nest-list-2");
+                    put("age", 35);
+                    put("password", "7654321");
+                }},
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "nest-list-3");
+                    put("age", "36");
+                    put("password", "1357246");
+                }}
+            ));
+            map.put("color2", "红色");
+            map.put("color3", "BLUE");
+            return map;
+        }
+
+        private Map<String, Object> createNestedOnlyMap() {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("nestObject", new LinkedHashMap<String, Object>() {{
+                put("name", "nest-root");
+                put("age", "31");
+                put("password", "1234567");
+            }});
+            map.put("nestObject2", new LinkedHashMap<String, Object>() {{
+                put("name", "nest-map");
+                put("age", 32);
+            }});
+            map.put("nestObject3", new LinkedHashMap<String, Object>() {{
+                put("name", "nest-tail");
+                put("age", "33");
+                put("password", "7654321");
+            }});
+            map.put("nestObjects", Arrays.asList(
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "nest-list-1");
+                    put("age", "34");
+                    put("password", "1234567");
+                }},
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "nest-list-2");
+                    put("age", 35);
+                    put("password", "7654321");
+                }},
+                new LinkedHashMap<String, Object>() {{
+                    put("name", "nest-list-3");
+                    put("age", "36");
+                    put("password", "1357246");
+                }}
+            ));
+            return map;
+        }
     }
 
     public static class SimpleSource {
@@ -333,6 +506,45 @@ public class FastBeanCopierJmhBenchmark {
 
         public void setBoy2(boolean boy2) {
             this.boy2 = boy2;
+        }
+    }
+
+    public static class NestedOnlyTarget {
+        private NestObject nestObject;
+        private NestObject nestObject2;
+        private Map<String, Object> nestObject3;
+        private List<Map<String, Object>> nestObjects;
+
+        public NestObject getNestObject() {
+            return nestObject;
+        }
+
+        public void setNestObject(NestObject nestObject) {
+            this.nestObject = nestObject;
+        }
+
+        public NestObject getNestObject2() {
+            return nestObject2;
+        }
+
+        public void setNestObject2(NestObject nestObject2) {
+            this.nestObject2 = nestObject2;
+        }
+
+        public Map<String, Object> getNestObject3() {
+            return nestObject3;
+        }
+
+        public void setNestObject3(Map<String, Object> nestObject3) {
+            this.nestObject3 = nestObject3;
+        }
+
+        public List<Map<String, Object>> getNestObjects() {
+            return nestObjects;
+        }
+
+        public void setNestObjects(List<Map<String, Object>> nestObjects) {
+            this.nestObjects = nestObjects;
         }
     }
 }

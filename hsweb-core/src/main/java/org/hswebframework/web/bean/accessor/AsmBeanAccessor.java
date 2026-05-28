@@ -1,6 +1,7 @@
 package org.hswebframework.web.bean.accessor;
 
 import lombok.SneakyThrows;
+import org.hswebframework.web.bean.Copier;
 import org.hswebframework.web.bean.FastBeanCopierSupport;
 import org.objectweb.asm.*;
 import org.springframework.core.ResolvableType;
@@ -10,6 +11,9 @@ import java.beans.Introspector;
 import java.beans.PropertyDescriptor;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class AsmBeanAccessor implements PropertyAccessor {
@@ -18,6 +22,7 @@ public class AsmBeanAccessor implements PropertyAccessor {
     private static final String CONVERTER_PROPERTY_TRANSFER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/ConverterPropertyTransfer";
     private static final String PROPERTY_TRANSFER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/PropertyTransfer";
     private static final String PROPERTY_WRITER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/PropertyWriter";
+    private static final String COPIER_INTERNAL_NAME = "org/hswebframework/web/bean/Copier";
     private static final String BEAN_CONVERTER_INTERNAL_NAME = "org/hswebframework/web/bean/Converter";
     private static final String TYPE_CONVERTER_INTERNAL_NAME = "org/hswebframework/web/bean/accessor/TypeConverter";
     private static final String RESOLVABLE_TYPE_INTERNAL_NAME = "org/springframework/core/ResolvableType";
@@ -25,6 +30,38 @@ public class AsmBeanAccessor implements PropertyAccessor {
 
     private static final AtomicInteger COUNTER = new AtomicInteger();
     private final PropertyAccessor fallback = new ReflectionBeanAccessor();
+
+    public Copier createDirectCopier(Class<?> sourceClass, Class<?> targetClass) {
+        if (shouldUseFallback(sourceClass, targetClass)) {
+            return null;
+        }
+        try {
+            Map<String, PropertyDescriptor> sourceProperties = findWritableReadableProperties(sourceClass, true);
+            Map<String, PropertyDescriptor> targetProperties = findWritableReadableProperties(targetClass, false);
+            if (sourceProperties.isEmpty() || targetProperties.isEmpty()) {
+                return null;
+            }
+            Map<PropertyDescriptor, PropertyDescriptor> mappings = new LinkedHashMap<>();
+            for (PropertyDescriptor sourceProperty : sourceProperties.values()) {
+                PropertyDescriptor targetProperty = targetProperties.get(sourceProperty.getName());
+                if (targetProperty == null) {
+                    continue;
+                }
+                if (!canUseDirectCopier(sourceProperty, targetProperty)) {
+                    return null;
+                }
+                mappings.put(sourceProperty, targetProperty);
+            }
+            if (mappings.isEmpty()) {
+                return null;
+            }
+            byte[] bytecode = createDirectCopierCode(sourceClass, targetClass, mappings);
+            Class<?> generatedClass = defineClass(bytecode);
+            return (Copier) generatedClass.getDeclaredConstructor().newInstance();
+        } catch (Throwable e) {
+            return null;
+        }
+    }
 
     @SneakyThrows
     public byte[] createReaderCode(Class<?> clazz, String name) {
@@ -420,6 +457,67 @@ public class AsmBeanAccessor implements PropertyAccessor {
         return cw.toByteArray();
     }
 
+    public byte[] createDirectCopierCode(Class<?> sourceClass,
+                                         Class<?> targetClass,
+                                         Map<PropertyDescriptor, PropertyDescriptor> mappings) {
+        String className = generateClassName(sourceClass.getSimpleName()
+                                             + "$To$"
+                                             + targetClass.getSimpleName()
+                                             + "$DirectCopier");
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, className, null, "java/lang/Object", new String[]{COPIER_INTERNAL_NAME});
+
+        MethodVisitor constructor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        constructor.visitCode();
+        constructor.visitVarInsn(Opcodes.ALOAD, 0);
+        constructor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        constructor.visitInsn(Opcodes.RETURN);
+        constructor.visitMaxs(1, 1);
+        constructor.visitEnd();
+
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC,
+                                          "copy",
+                                          "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/Set;L" + BEAN_CONVERTER_INTERNAL_NAME + ";)V",
+                                          null,
+                                          null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(sourceClass));
+        mv.visitVarInsn(Opcodes.ASTORE, 5);
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetClass));
+        mv.visitVarInsn(Opcodes.ASTORE, 6);
+
+        Label withIgnore = new Label();
+        Label end = new Label();
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/Set", "isEmpty", "()Z", true);
+        mv.visitJumpInsn(Opcodes.IFEQ, withIgnore);
+        for (Map.Entry<PropertyDescriptor, PropertyDescriptor> entry : mappings.entrySet()) {
+            generateDirectCopyStatement(mv, sourceClass, targetClass, entry.getKey(), entry.getValue(), false);
+        }
+        mv.visitJumpInsn(Opcodes.GOTO, end);
+
+        mv.visitLabel(withIgnore);
+        for (Map.Entry<PropertyDescriptor, PropertyDescriptor> entry : mappings.entrySet()) {
+            String name = entry.getKey().getName();
+            Label next = new Label();
+            mv.visitVarInsn(Opcodes.ALOAD, 3);
+            mv.visitLdcInsn(name);
+            mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/Set", "contains", "(Ljava/lang/Object;)Z", true);
+            mv.visitJumpInsn(Opcodes.IFNE, next);
+            generateDirectCopyStatement(mv, sourceClass, targetClass, entry.getKey(), entry.getValue(), true);
+            mv.visitLabel(next);
+        }
+        mv.visitLabel(end);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
     public byte[] createConverterTransferCode(Class<?> sourceClass,
                                               PropertyDescriptor sourceDescriptor,
                                               boolean sourcePrimitive,
@@ -546,8 +644,121 @@ public class AsmBeanAccessor implements PropertyAccessor {
         }
     }
 
+    private Map<String, PropertyDescriptor> findWritableReadableProperties(Class<?> clazz, boolean source) throws Exception {
+        BeanInfo beanInfo = Introspector.getBeanInfo(clazz);
+        Map<String, PropertyDescriptor> properties = new LinkedHashMap<>();
+        for (PropertyDescriptor property : beanInfo.getPropertyDescriptors()) {
+            if ("class".equals(property.getName())) {
+                continue;
+            }
+            if (source) {
+                if (property.getReadMethod() == null) {
+                    continue;
+                }
+            } else if (property.getWriteMethod() == null) {
+                continue;
+            }
+            properties.put(property.getName(), property);
+        }
+        return properties;
+    }
+
     private String generateClassName(String prefix) {
         return "org/hswebframework/web/bean/accessor/" + prefix + "$" + COUNTER.incrementAndGet();
+    }
+
+    private boolean canUseDirectCopier(PropertyDescriptor sourceProperty, PropertyDescriptor targetProperty) {
+        Method readMethod = sourceProperty.getReadMethod();
+        Method writeMethod = targetProperty.getWriteMethod();
+        if (readMethod == null || writeMethod == null) {
+            return false;
+        }
+        if (!Modifier.isPublic(readMethod.getModifiers()) || !Modifier.isPublic(writeMethod.getModifiers())) {
+            return false;
+        }
+        Class<?> sourceType = readMethod.getReturnType();
+        Class<?> targetType = writeMethod.getParameterTypes()[0];
+        return isDirectCompatible(sourceType, targetType);
+    }
+
+    private boolean isDirectCompatible(Class<?> sourceType, Class<?> targetType) {
+        if (sourceType == targetType) {
+            return true;
+        }
+        if (sourceType.isPrimitive()) {
+            return getWrapperType(sourceType) == targetType || targetType == Object.class;
+        }
+        if (targetType.isPrimitive()) {
+            return getWrapperType(targetType) == sourceType;
+        }
+        return targetType.isAssignableFrom(sourceType);
+    }
+
+    private boolean shouldClone(Class<?> sourceType, Class<?> targetType) {
+        return sourceType == targetType
+            && sourceType.isArray();
+    }
+
+    private void generateDirectCopyStatement(MethodVisitor mv,
+                                             Class<?> sourceClass,
+                                             Class<?> targetClass,
+                                             PropertyDescriptor sourceDescriptor,
+                                             PropertyDescriptor targetDescriptor,
+                                             boolean ignoreBranch) {
+        Method readMethod = sourceDescriptor.getReadMethod();
+        Method writeMethod = targetDescriptor.getWriteMethod();
+        Class<?> sourceType = readMethod.getReturnType();
+        Class<?> targetType = writeMethod.getParameterTypes()[0];
+        Label skip = new Label();
+
+        if (sourceType.isPrimitive()) {
+            mv.visitVarInsn(Opcodes.ALOAD, 6);
+            mv.visitVarInsn(Opcodes.ALOAD, 5);
+            mv.visitMethodInsn(readMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                               Type.getInternalName(readMethod.getDeclaringClass()),
+                               readMethod.getName(),
+                               Type.getMethodDescriptor(readMethod),
+                               readMethod.getDeclaringClass().isInterface());
+            adaptPrimitiveValueForTarget(mv, sourceType, targetType);
+            mv.visitMethodInsn(writeMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                               Type.getInternalName(writeMethod.getDeclaringClass()),
+                               writeMethod.getName(),
+                               Type.getMethodDescriptor(writeMethod),
+                               writeMethod.getDeclaringClass().isInterface());
+            return;
+        }
+
+        mv.visitVarInsn(Opcodes.ALOAD, 5);
+        mv.visitMethodInsn(readMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                           Type.getInternalName(readMethod.getDeclaringClass()),
+                           readMethod.getName(),
+                           Type.getMethodDescriptor(readMethod),
+                           readMethod.getDeclaringClass().isInterface());
+        mv.visitVarInsn(Opcodes.ASTORE, 7);
+        Label continueLabel = new Label();
+        mv.visitVarInsn(Opcodes.ALOAD, 7);
+        mv.visitJumpInsn(Opcodes.IFNONNULL, continueLabel);
+        mv.visitJumpInsn(Opcodes.GOTO, skip);
+        mv.visitLabel(continueLabel);
+
+        mv.visitVarInsn(Opcodes.ALOAD, 6);
+        if (shouldClone(sourceType, targetType)) {
+            mv.visitVarInsn(Opcodes.ALOAD, 7);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC,
+                               Type.getInternalName(AsmBeanAccessor.class),
+                               "cloneValue",
+                               "(Ljava/lang/Object;)Ljava/lang/Object;",
+                               false);
+        } else {
+            mv.visitVarInsn(Opcodes.ALOAD, 7);
+        }
+        adaptReferenceValueForTarget(mv, targetType);
+        mv.visitMethodInsn(writeMethod.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                           Type.getInternalName(writeMethod.getDeclaringClass()),
+                           writeMethod.getName(),
+                           Type.getMethodDescriptor(writeMethod),
+                           writeMethod.getDeclaringClass().isInterface());
+        mv.visitLabel(skip);
     }
 
     @SneakyThrows
@@ -680,6 +891,25 @@ public class AsmBeanAccessor implements PropertyAccessor {
             return Character.class;
         }
         return primitiveType;
+    }
+
+    public static Object cloneValue(Object value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            if (value.getClass().isArray()) {
+                int length = java.lang.reflect.Array.getLength(value);
+                Object clone = java.lang.reflect.Array.newInstance(value.getClass().getComponentType(), length);
+                System.arraycopy(value, 0, clone, 0, length);
+                return clone;
+            }
+            Method clone = value.getClass().getMethod("clone");
+            clone.setAccessible(true);
+            return clone.invoke(value);
+        } catch (Throwable ignore) {
+            return value;
+        }
     }
 
     private void generateTransferConvertMethod(ClassWriter cw,

@@ -23,6 +23,7 @@ public class FastBeanCopierJmhRunner {
 
         Options options = new OptionsBuilder()
             .include(FastBeanCopierJmhBenchmark.class.getSimpleName())
+            .forks(0)
             .result(resultFile.toString())
             .resultFormat(ResultFormatType.JSON)
             .build();
