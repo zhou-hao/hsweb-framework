@@ -1,163 +1,233 @@
 # FastBeanCopier Benchmark Summary
 
-> 更新时间：2026-05-28
+> 更新时间：2026-05-31
 
-## 本轮优化摘要
+## 本轮实现摘要
 
-本轮围绕 `asm-accessor` 做了收口优化，重点包括：
+本轮围绕默认 backend、缓存命中稳定性、跨 classloader 健壮性继续收口：
 
-- `Map -> Bean` 按 `entrySet()` 驱动，减少目标属性逐个 `Map.get`
-- nested bean-like `Map` 值直接走 `FastBeanCopierSupport.copy(...)`
-- converter 增加常用 `String -> Number` fast path
-- accessor backend 增加 direct accessor 快路径
-- `asm-accessor` 增加 **simple bean -> bean 专用 Copier 生成**
-- `asm-accessor` direct copier 收紧 clone 策略：**仅数组 clone**
+- 默认 backend 切换为 `asm-accessor`
+- 增加 `FastBeanCopierBackendSelector`
+- 支持通过 `hsweb.fast-bean-copier.backend` 显式指定 backend
+- 支持 native-image / disable-codegen 环境探测与 runtime backend 自动降级
+- 动态 classloader 场景统一回退到 `reflection-accessor`
+- 热点缓存从 weak/soft 策略收口为**强命中优先**
+  - volatile copier cache 改为强缓存
+  - `ClassDescriptions` / converter 子缓存改为按 classloader 分段的强缓存
+  - `GenericKey` 泛型缓存改为强缓存
+- 对外暴露 `FastBeanCopier.clearCache()` / `clearCache(ClassLoader)`
 
-## 覆盖场景
+## 功能与健壮性验证
 
-- simple bean -> bean
-- complex bean -> bean
-- bean -> map
-- bean -> extendable
-- extendable -> map
-- heterogeneous map -> bean
-- conversion-heavy map -> bean
-- collection-heavy map -> bean
-- nested-heavy map -> bean
-- nested-only map -> bean
+单元测试：
+
+```bash
+mvn -pl hsweb-core -am -Dtest=FastBeanCopierSupportTest,FastBeanCopierTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+当前结果：
+
+- Tests run: `33`
+- Failures: `0`
+- Errors: `0`
+- Skipped: `0`
+
+已覆盖/验证：
+
+- 默认 JVM 环境优先选择 `asm-accessor`
+- native hint 环境优先选择 `reflection-accessor`
+- backend 显式 override 生效
+- native / disable-codegen 下 effective backend 自动降级
+- 跨 classloader 复制兼容
+- 动态 classloader 使用 volatile cache + reflection fallback
+- `clearCache(ClassLoader)` 可回收动态 loader 关联缓存并重建 copier
+- 复杂对象 copy、异构 map -> bean、转换密集场景、集合密集场景、嵌套对象场景、extendable 场景兼容
+
+## JMH 验证
+
+执行命令：
+
+```bash
+mvn -pl hsweb-core -q \
+  -Dexec.classpathScope=test \
+  -Dexec.mainClass=org.hswebframework.web.bean.FastBeanCopierJmhRunner \
+  org.codehaus.mojo:exec-maven-plugin:3.5.0:java
+```
+
+结果文件：
+
+- `hsweb-core/target/jmh-results/fast-bean-copier.json`
+
+说明：
+
+- 当前这条命令在仓库内可以稳定跑通 **非 fork** JMH（当前 Runner 默认不显式设置 forks，沿用 benchmark 的 `@Fork(1)` 会受 `exec-maven-plugin` classpath 影响，见下文“已知限制”）
+- 因此当前 JMH 结果适合做**同一进程内相对对比**，不应当作为跨环境绝对值结论
+
+## 代表性结果（当前代码状态）
+
+单位：`us/op`，越小越好。
+
+### simple bean -> bean
+
+- asm-accessor: `0.100`
+- javassist: `0.102`
+- reflection-accessor: `0.331`
+- reflect: `0.573`
+
+### complex bean -> bean
+
+- javassist: `5.547`
+- asm-accessor: `6.495`
+- reflection-accessor: `8.125`
+- reflect: `8.911`
+
+### bean -> map
+
+- asm-accessor: `0.908`
+- reflection-accessor: `1.127`
+- javassist: `1.851`
+- reflect: `2.006`
+
+### heterogeneous map -> bean
+
+- asm-accessor: `7.429`
+- reflection-accessor: `7.730`
+- javassist: `8.426`
+- reflect: `8.953`
+
+### conversion-heavy map -> bean
+
+- asm-accessor: `9.530`
+- javassist: `9.785`
+- reflection-accessor: `9.974`
+- reflect: `11.011`
+
+### collection-heavy map -> bean
+
+- asm-accessor: `0.857`
+- reflection-accessor: `0.889`
+- javassist: `1.333`
+- reflect: `1.530`
+
+### nested-heavy map -> bean
+
+- asm-accessor: `1.177`
+- reflection-accessor: `1.241`
+- javassist: `1.917`
+- reflect: `1.995`
+
+### nested-only map -> bean
+
+- reflection-accessor: `0.811`
+- asm-accessor: `0.832`
+- javassist: `1.081`
+- reflect: `1.254`
+
+### bean -> extendable
+
+- asm-accessor: `1.075`
+- javassist: `1.128`
+- reflection-accessor: `1.203`
+- reflect: `1.511`
+
+### extendable -> map
+
+- reflection-accessor: `1.069`
+- asm-accessor: `1.076`
+- javassist: `1.128`
+- reflect: `1.212`
 
 ## 当前结论
 
-### 1. `asm-accessor` 已成为默认首选 backend
+### 1. 默认 backend 使用 `asm-accessor` 是合理的
 
-在以下真实场景中，`asm-accessor` 整体最优：
+从当前单测内场景 benchmark 与 JMH 一致看：
 
-- complex bean -> bean
-- heterogeneous map -> bean
-- conversion-heavy map -> bean
-- collection-heavy map -> bean
-- nested-heavy / nested-only map -> bean
-- bean -> map
-- bean -> extendable / extendable -> map
+- `simple bean -> bean`：`asm-accessor` 与 `javassist` 基本持平，略优
+- `bean -> map`、`heterogeneous map -> bean`、`conversion-heavy map -> bean`、`collection-heavy map -> bean`、`nested-heavy map -> bean`、`bean -> extendable`：`asm-accessor` 最优或并列最优
+- 仅 `complex bean -> bean` 单项上 `javassist` 仍领先，当前约 `1.17x`
 
-### 2. simple bean -> bean 已基本打平甚至部分反超 `javassist`
+综合真实使用面，`asm-accessor` 仍是更合理的默认 backend。
 
-经过 direct copier 与 clone 策略优化后：
+### 2. 当前缓存策略更符合“性能优先”
 
-- 场景对比中，`asm-accessor` 已优于 `javassist`
-- 定向 JMH 中，`asm-accessor` 与 `javassist` 已基本同一量级
+本轮关键变化不是单纯“多加缓存”，而是把原先容易因 GC 触发重建的缓存收口为：
 
-### 3. `reflection-accessor` 仍是稳定兜底
+- 稳定 classloader：强缓存
+- 动态 classloader：强缓存命中 + `clearCache(ClassLoader)` 显式释放
 
-当需要：
+这样做的收益：
 
-- 更低的冷启动生成成本
-- 更保守的运行时生成策略
-- future native-image 降级方案
+- 避免 weak/soft value 在内存波动下触发 copier / converter / enum lookup / class description 重建
+- 减少热路径吞吐抖动和尾延迟抖动
 
-`reflection-accessor` 是当前最稳妥的 fallback。
+代价：
 
-## backend 推荐策略
+- 如果宿主持续创建大量动态 classloader、又不调用 `clearCache(ClassLoader)`，缓存会增长
 
-### 默认推荐
+当前这个取舍更符合 FastBeanCopier 的定位：**优先稳定命中性能**。
 
-- **默认 backend：`asm-accessor`**
+### 3. 健壮性整体达标，但“受限反射环境”仍有边界
 
-原因：
+当前已验证：
 
-- 复杂场景整体最佳
-- simple 场景已不再明显落后
-- 更符合后续替代 `javassist` 的方向
+1. 普通 JVM：默认 `asm-accessor`
+2. native-image / disable-codegen：自动降级到 `reflection-accessor`
+3. 跨 classloader：动态 loader 下不再尝试 runtime codegen backend
 
-### 保守 fallback
+但仍需注意：
 
-- **fallback backend：`reflection-accessor`**
+- `FastBeanCopierConverterSupport#createCollectionFactory` 仍使用 `constructor.setAccessible(true)`
+- `ReflectionBeanAccessor`、`AsmBeanAccessor` 也仍存在 `setAccessible(true)` / private access 路径
 
-适用于：
+因此：
 
-- ASM 生成失败
-- 跨 classloader / 可见性不满足
-- native-image 环境不适合运行时字节码生成
+- **codegen backend 已经规避 native / 动态 loader 风险**
+- 但要宣称“完整 native image 适配完成”仍然证据不足
+- 当前更准确的结论应是：**native / 受限环境下已有稳定 fallback 基础，但还不是完整 AOT/Native 最终态**
 
-### `javassist` 的当前定位
+## 已知限制
 
-`javassist` 仍可保留作为兼容 backend，但从当前结果看：
+### 1. forked JMH 仍不可直接用于当前 exec 运行方式
 
-- 已不再是默认最优解
-- 可逐步退化为兼容实现
+尝试：
 
-## 代表性结果
+```bash
+mvn -pl hsweb-core -q \
+  -Dexec.classpathScope=test \
+  -Dexec.mainClass=org.hswebframework.web.bean.FastBeanCopierJmhRunner \
+  -Dhsweb.fast-bean-copier.jmh.include=copySimpleBean \
+  -Dhsweb.fast-bean-copier.jmh.forks=1 \
+  org.codehaus.mojo:exec-maven-plugin:3.5.0:java
+```
 
-### 场景对比（FastBeanCopierSupportTest）
+会出现：
 
-#### simple-bean -> bean
+- `ClassNotFoundException: org.openjdk.jmh.runner.ForkedMain`
 
-- javassist: `2.84ms`
-- reflection-accessor: `29.76ms`
-- asm-accessor: `1.87ms`
+因此当前仓库内可信 JMH 证据仍然是：
 
-#### complex-bean -> bean
+- `forks=0 / non-forked` 相对对比结果
 
-- javassist: `266.68ms`
-- reflection-accessor: `251.38ms`
-- asm-accessor: `198.02ms`
+### 2. 动态 classloader 缓存释放依赖显式清理
 
-#### conversion-heavy-map -> bean
+这是当前为保证命中性能做的主动取舍。
 
-- javassist: `466.38ms`
-- reflection-accessor: `265.01ms`
-- asm-accessor: `261.07ms`
+适合：
 
-#### collection-heavy-map -> bean
+- 常规应用
+- 少量动态 loader
+- 宿主可在卸载插件/脚本/隔离模块时显式 `clearCache(loader)`
 
-- javassist: `93.13ms`
-- reflection-accessor: `36.84ms`
-- asm-accessor: `25.37ms`
+不适合：
 
-#### nested-heavy-map -> bean
+- 极高频、大量、不可控动态 classloader 且宿主无法感知卸载时机的场景
 
-- javassist: `101.66ms`
-- reflection-accessor: `32.50ms`
-- asm-accessor: `39.62ms`
+## 后续优化建议
 
-> 注：nested-heavy 在场景对比里受运行波动影响较大；结合多轮 JMH 与多次场景跑数，`asm-accessor` 与 `reflection-accessor` 同属第一梯队，`asm-accessor` 在整体真实场景仍是首选。
-
-### 定向 JMH（simple / complex）
-
-#### copySimpleBean
-
-- javassist: `0.075 us/op`
-- reflection-accessor: `0.379 us/op`
-- asm-accessor: `0.080 us/op`
-
-#### copyComplexBean
-
-- javassist: `13.269 us/op` *(本轮波动偏大，仅供趋势参考)*
-- reflection-accessor: `8.552 us/op`
-- asm-accessor: `7.095 us/op`
-
-## native-image 建议
-
-当前建议策略：
-
-1. 常规 JVM 环境：
-   - 默认 `asm-accessor`
-2. native-image / 受限运行时：
-   - 自动降级 `reflection-accessor`
-3. 若需彻底去除运行时字节码生成：
-   - 后续可增加显式配置开关
-
-## 剩余优化空间
-
-当前优先级已下降，后续更适合做收尾而不是大改：
-
-1. native-image 环境自动探测与 backend 降级
-2. backend 选择策略外置配置
-3. conversion plan cache（若继续追求极限 map -> bean）
-4. 清理 / 退役 `javassist` 的迁移路径评估
-
-## 结果来源
-
-- `FastBeanCopierSupportTest`
-- `FastBeanCopierJmhBenchmark`
-- `hsweb-core/target/jmh-results/fast-bean-copier.json`
+1. 修复 forked JMH 的 classpath，拿到更强的基准证据
+2. 继续减少受限环境下的 `setAccessible(true)` 依赖
+3. 若后续确实需要 native image 正式支持，补充：
+   - 反射 metadata
+   - AOT/static copier SPI
+   - 更严格的 native smoke test

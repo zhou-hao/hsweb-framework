@@ -57,11 +57,79 @@ public class FastBeanCopierSupportTest {
             FastBeanCopier.DEFAULT_CONVERT.convert("123", Integer.class, FastBeanCopier.EMPTY_CLASS_ARRAY)
         );
         Assert.assertSame(FastBeanCopierSupport.getBackend(), FastBeanCopier.getBackend());
-        Assert.assertTrue(FastBeanCopierSupport.getBackend() instanceof JavassistFastBeanCopierBackend);
+        Assert.assertTrue(FastBeanCopierSupport.getBackend() instanceof AsmAccessorFastBeanCopierBackend);
         Assert.assertSame(
             FastBeanCopierSupport.getCopier(source, target, true),
             FastBeanCopier.getCopier(source, target, true)
         );
+    }
+
+
+@Test
+public void testDefaultBackendSelectorPrefersAsmOnJvm() {
+    System.clearProperty(FastBeanCopierBackendSelector.BACKEND_PROPERTY);
+    System.clearProperty(FastBeanCopierBackendSelector.NATIVE_HINT_PROPERTY);
+    System.clearProperty(FastBeanCopierBackendSelector.NATIVE_IMAGE_PROPERTY);
+
+    FastBeanCopierBackend backend = FastBeanCopierBackendSelector.selectDefaultBackend();
+    Assert.assertTrue(backend instanceof AsmAccessorFastBeanCopierBackend);
+}
+
+@Test
+public void testDefaultBackendSelectorFallsBackToReflectionForNativeHint() {
+    String previous = System.getProperty(FastBeanCopierBackendSelector.NATIVE_HINT_PROPERTY);
+    System.setProperty(FastBeanCopierBackendSelector.NATIVE_HINT_PROPERTY, "true");
+    try {
+        FastBeanCopierBackend backend = FastBeanCopierBackendSelector.selectDefaultBackend();
+        Assert.assertTrue(backend instanceof ReflectionAccessorFastBeanCopierBackend);
+    } finally {
+        if (previous == null) {
+            System.clearProperty(FastBeanCopierBackendSelector.NATIVE_HINT_PROPERTY);
+        } else {
+            System.setProperty(FastBeanCopierBackendSelector.NATIVE_HINT_PROPERTY, previous);
+        }
+    }
+}
+
+@Test
+public void testBackendSelectorSupportsExplicitOverride() {
+    String previous = System.getProperty(FastBeanCopierBackendSelector.BACKEND_PROPERTY);
+    System.setProperty(FastBeanCopierBackendSelector.BACKEND_PROPERTY, "javassist");
+    try {
+        FastBeanCopierBackend backend = FastBeanCopierBackendSelector.selectDefaultBackend();
+        Assert.assertTrue(backend instanceof JavassistFastBeanCopierBackend);
+    } finally {
+        if (previous == null) {
+            System.clearProperty(FastBeanCopierBackendSelector.BACKEND_PROPERTY);
+        } else {
+            System.setProperty(FastBeanCopierBackendSelector.BACKEND_PROPERTY, previous);
+        }
+    }
+}
+
+    @Test
+    public void testDefaultConverterSupportsGenericCollectionAndMapConversion() {
+        java.util.List<?> list = FastBeanCopierSupport.DEFAULT_CONVERT.convert(
+            java.util.Arrays.asList("1", "2", "3"),
+            java.util.List.class,
+            new Class[]{Integer.class}
+        );
+        Assert.assertEquals(java.util.Arrays.asList(1, 2, 3), list);
+
+        java.util.Map<?, ?> map = FastBeanCopierSupport.DEFAULT_CONVERT.convert(
+            java.util.Arrays.asList("alpha", "beta"),
+            java.util.Map.class,
+            new Class[]{Integer.class, String.class}
+        );
+        Assert.assertEquals("alpha", map.get(0));
+        Assert.assertEquals("beta", map.get(1));
+
+        java.util.List<?> second = FastBeanCopierSupport.DEFAULT_CONVERT.convert(
+            new String[]{"4", "5"},
+            java.util.List.class,
+            new Class[]{Integer.class}
+        );
+        Assert.assertEquals(java.util.Arrays.asList(4, 5), second);
     }
 
     @Test
@@ -126,6 +194,102 @@ public class FastBeanCopierSupportTest {
             }
         } finally {
             FastBeanCopierSupport.setBackend(original);
+        }
+    }
+
+    @Test
+    public void testDynamicClassLoaderUsesVolatileCacheAndReflectionFallback() throws Exception {
+        FastBeanCopierBackend original = FastBeanCopierSupport.getBackend();
+        try (URLClassLoader loader = createTestClassLoader()) {
+            FastBeanCopierSupport.setBackend(new AsmAccessorFastBeanCopierBackend());
+            FastBeanCopierSupport.clearCache();
+
+            Class<?> sourceClass = loader.loadClass(Source.class.getName());
+            Class<?> targetClass = loader.loadClass(Target.class.getName());
+
+            Assert.assertTrue(FastBeanCopierSupport.usesVolatileClassLoader(sourceClass, targetClass));
+            Assert.assertTrue(FastBeanCopierSupport.getEffectiveBackend(sourceClass, targetClass)
+                                  instanceof ReflectionAccessorFastBeanCopierBackend);
+
+            Object source = sourceClass.getDeclaredConstructor().newInstance();
+            FastBeanCopier.copy(createCrossClassLoaderSourceMap(), source);
+            Object target = targetClass.getDeclaredConstructor().newInstance();
+
+            Copier copier1 = FastBeanCopierSupport.getCopier(source, target, true);
+            Copier copier2 = FastBeanCopierSupport.getCopier(source, target, true);
+
+            Assert.assertSame(copier1, copier2);
+            Assert.assertEquals(0, FastBeanCopierSupport.getStableCacheSize());
+            Assert.assertEquals(2, FastBeanCopierSupport.getVolatileCacheSize());
+
+            FastBeanCopier.copy(source, target);
+            Map<String, Object> copied = FastBeanCopier.copy(target, new HashMap<>());
+            Assert.assertEquals("cross-loader", copied.get("name"));
+            Assert.assertEquals(24, copied.get("age"));
+        } finally {
+            FastBeanCopierSupport.setBackend(original);
+            FastBeanCopierSupport.clearCache();
+        }
+    }
+
+    @Test
+    public void testClearCacheByClassLoaderRecreatesVolatileCopier() throws Exception {
+        FastBeanCopierBackend original = FastBeanCopierSupport.getBackend();
+        try (URLClassLoader loader = createTestClassLoader()) {
+            FastBeanCopierSupport.setBackend(new AsmAccessorFastBeanCopierBackend());
+            FastBeanCopierSupport.clearCache();
+
+            Class<?> sourceClass = loader.loadClass(Source.class.getName());
+            Class<?> targetClass = loader.loadClass(Target.class.getName());
+            Object source = sourceClass.getDeclaredConstructor().newInstance();
+            Object target = targetClass.getDeclaredConstructor().newInstance();
+            FastBeanCopier.copy(createCrossClassLoaderSourceMap(), source);
+
+            Copier first = FastBeanCopierSupport.getCopier(source, target, true);
+            Assert.assertEquals(0, FastBeanCopierSupport.getStableCacheSize());
+            Assert.assertEquals(2, FastBeanCopierSupport.getVolatileCacheSize());
+
+            FastBeanCopierSupport.clearCache(loader);
+
+            Assert.assertEquals(0, FastBeanCopierSupport.getVolatileCacheSize());
+
+            Copier second = FastBeanCopierSupport.getCopier(source, target, true);
+            Assert.assertNotSame(first, second);
+        } finally {
+            FastBeanCopierSupport.setBackend(original);
+            FastBeanCopierSupport.clearCache();
+        }
+    }
+
+    @Test
+    public void testClearCacheByClassLoader() throws Exception {
+        FastBeanCopierBackend original = FastBeanCopierSupport.getBackend();
+        try (URLClassLoader loader = createTestClassLoader()) {
+            FastBeanCopierSupport.setBackend(new ReflectionAccessorFastBeanCopierBackend());
+            FastBeanCopierSupport.clearCache();
+
+            Class<?> sourceClass = loader.loadClass(Source.class.getName());
+            Class<?> targetClass = loader.loadClass(Target.class.getName());
+            Object source = sourceClass.getDeclaredConstructor().newInstance();
+            Object target = targetClass.getDeclaredConstructor().newInstance();
+            FastBeanCopier.copy(createCrossClassLoaderSourceMap(), source);
+
+            FastBeanCopierSupport.getCopier(source, target, true);
+            FastBeanCopierSupport.DEFAULT_CONVERT.convert(Collections.singletonMap("name", "loader"),
+                                                         targetClass,
+                                                         FastBeanCopierSupport.EMPTY_CLASS_ARRAY);
+
+            Assert.assertTrue(FastBeanCopierSupport.getVolatileCacheSize() > 0);
+
+            FastBeanCopier.clearCache(loader);
+
+            Assert.assertEquals(0, FastBeanCopierSupport.getVolatileCacheSize());
+
+            Copier recreated = FastBeanCopierSupport.getCopier(source, target, true);
+            Assert.assertNotNull(recreated);
+        } finally {
+            FastBeanCopierSupport.setBackend(original);
+            FastBeanCopierSupport.clearCache();
         }
     }
 

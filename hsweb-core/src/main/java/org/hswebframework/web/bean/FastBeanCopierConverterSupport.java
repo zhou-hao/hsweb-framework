@@ -11,6 +11,7 @@ import org.hswebframework.web.utils.DynamicArrayList;
 import org.springframework.util.NumberUtils;
 
 import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -24,8 +25,15 @@ final class FastBeanCopierConverterSupport implements Converter {
             return null;
         }
     };
-    private static final Map<Class<?>, org.apache.commons.beanutils.Converter> APACHE_CONVERTER_CACHE = new ConcurrentHashMap<>();
-    private static final Map<Class<?>, Map<String, Object>> ENUM_LOOKUP_CACHE = new ConcurrentHashMap<>();
+    private static final ClassLoaderScopedClassCache<org.apache.commons.beanutils.Converter> APACHE_CONVERTER_CACHE =
+        new ClassLoaderScopedClassCache<>();
+    private static final ClassLoaderScopedClassCache<Map<String, Object>> ENUM_LOOKUP_CACHE =
+        new ClassLoaderScopedClassCache<>();
+    private static final ClassLoaderScopedClassCache<Boolean> BEAN_LIKE_TARGET_CACHE =
+        new ClassLoaderScopedClassCache<>();
+    private static final ClassLoaderScopedClassCache<CollectionFactory> COLLECTION_FACTORY_CACHE =
+        new ClassLoaderScopedClassCache<>();
+    private static final Map<PlanKey, ConversionPlan> PLAN_CACHE = new ConcurrentHashMap<>();
 
     static {
         PRIMITIVE_WRAPPERS.put(byte.class, Byte.class);
@@ -40,26 +48,32 @@ final class FastBeanCopierConverterSupport implements Converter {
 
     private BeanFactory beanFactory;
 
+    static void clearCache() {
+        APACHE_CONVERTER_CACHE.clear();
+        ENUM_LOOKUP_CACHE.clear();
+        BEAN_LIKE_TARGET_CACHE.clear();
+        COLLECTION_FACTORY_CACHE.clear();
+        PLAN_CACHE.clear();
+    }
+
+    static void clearCache(ClassLoader loader) {
+        if (loader == null) {
+            clearCache();
+            return;
+        }
+        APACHE_CONVERTER_CACHE.clear(loader);
+        ENUM_LOOKUP_CACHE.clear(loader);
+        BEAN_LIKE_TARGET_CACHE.clear(loader);
+        COLLECTION_FACTORY_CACHE.clear(loader);
+        PLAN_CACHE.keySet().removeIf(key -> key.involves(loader));
+    }
+
     void setBeanFactory(BeanFactory beanFactory) {
         this.beanFactory = beanFactory;
     }
 
     Collection<?> newCollection(Class<?> targetClass) {
-        if (targetClass == List.class || targetClass == Collection.class) {
-            return new ArrayList<>();
-        } else if (targetClass == ConcurrentHashMap.KeySetView.class) {
-            return ConcurrentHashMap.newKeySet();
-        } else if (targetClass == Set.class) {
-            return new HashSet<>();
-        } else if (targetClass == Queue.class) {
-            return new LinkedList<>();
-        } else {
-            try {
-                return (Collection<?>) targetClass.getDeclaredConstructor().newInstance();
-            } catch (Exception e) {
-                throw new UnsupportedOperationException("Unsupported Collection Type:" + targetClass, e);
-            }
-        }
+        return getCollectionFactory(targetClass).create();
     }
 
     @Override
@@ -69,136 +83,56 @@ final class FastBeanCopierConverterSupport implements Converter {
         if (source == null) {
             return null;
         }
-        ClassDescription target = ClassDescriptions.getDescription(targetClass);
+        return (T) getPlan(targetClass, genericType).convert(this, source);
+    }
 
-        if (isDirectScalarAssignable(targetClass, source)) {
-            return (T) source;
-        }
+    private ConversionPlan getPlan(Class<?> targetClass, Class[] genericType) {
+        Class<?>[] normalized = normalizeGenericTypes(genericType);
+        return PLAN_CACHE.computeIfAbsent(new PlanKey(targetClass, normalized),
+                                          key -> new ConversionPlan(key.targetClass, key.genericTypes));
+    }
 
-        if (target.isEnumType() && source instanceof EnumDict) {
-            Object val = ((EnumDict) source).getValue();
-            if (targetClass.isInstance(val)) {
-                return ((T) val);
-            }
-            Object matched = lookupEnum(targetClass, val);
-            if (matched == null) {
-                matched = lookupEnum(targetClass, ((EnumDict<?>) source).getText());
-            }
-            if (matched != null) {
-                return (T) matched;
-            }
-            return convert(val, targetClass, genericType);
+    private Class<?>[] normalizeGenericTypes(Class[] genericType) {
+        if (genericType == null || genericType.length == 0) {
+            return FastBeanCopierSupport.EMPTY_CLASS_ARRAY;
         }
-        if (targetClass == String.class || targetClass == CharSequence.class) {
-            if (source instanceof Date) {
-                return (T) DateFormatter.toString(((Date) source), "yyyy-MM-dd HH:mm:ss");
-            }
-            return (T) String.valueOf(source);
+        Class<?>[] normalized = new Class<?>[genericType.length];
+        System.arraycopy(genericType, 0, normalized, 0, genericType.length);
+        return normalized;
+    }
+
+    private CollectionFactory getCollectionFactory(Class<?> targetClass) {
+        return COLLECTION_FACTORY_CACHE.computeIfAbsent(targetClass, FastBeanCopierConverterSupport::createCollectionFactory);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static CollectionFactory createCollectionFactory(Class<?> targetClass) {
+        if (targetClass == List.class || targetClass == Collection.class) {
+            return ArrayList::new;
         }
-        if (targetClass == Object.class) {
-            return (T) source;
+        if (targetClass == ConcurrentHashMap.KeySetView.class) {
+            return () -> (Collection<Object>) ConcurrentHashMap.newKeySet();
         }
-        if (targetClass == Date.class) {
-            if (source instanceof String) {
-                T parsed = (T) DateFormatter.fromString((String) source);
-                if (parsed == null) {
-                    return (T) converterByApache(Date.class, source);
-                }
-                return parsed;
-            }
-            if (source instanceof Number) {
-                return (T) new Date(((Number) source).longValue());
-            }
-            if (source instanceof Date) {
-                return (T) new Date(((Date) source).getTime());
-            }
+        if (targetClass == Set.class) {
+            return HashSet::new;
         }
-        if (targetClass == boolean.class || targetClass == Boolean.class) {
-            return (T) convertToBoolean(source);
-        }
-        if (targetClass == char.class || targetClass == Character.class) {
-            return (T) convertToCharacter(source);
-        }
-        if (target.isCollectionType()) {
-            Collection collection = newCollection(targetClass);
-            Collection sourceCollection = asCollection(source);
-            if (genericType != null && genericType.length > 0 && genericType[0] != Object.class) {
-                Class<?> elementType = genericType[0];
-                for (Object sourceObj : sourceCollection) {
-                    if (sourceObj == null || isDirectAssignable(elementType, sourceObj)) {
-                        collection.add(sourceObj);
-                    } else {
-                        collection.add(convert(sourceObj, elementType, null));
-                    }
-                }
-            } else {
-                collection.addAll(sourceCollection);
-            }
-            return (T) collection;
-        }
-        if (target.isEnumType()) {
-            Object val = lookupEnum(targetClass, source);
-            if (val != null) {
-                if (targetClass.isInstance(val)) {
-                    return (T) val;
-                }
-                return convert(val, targetClass, genericType);
-            }
-            log.warn("无法将:{}转为枚举:{}",
-                     source,
-                     targetClass,
-                     new ClassCastException(source + "=>" + targetClass));
-            return null;
-        }
-        if (target.isArrayType()) {
-            return (T) convertToArray(source, targetClass.getComponentType());
-        }
-        if (target.isNumber()) {
-            if (source instanceof Number) {
-                return (T) convertNumber((Number) source, targetClass);
-            }
-            if (source instanceof String) {
-                return (T) convertStringToNumber((String) source, targetClass);
-            }
-            if (source instanceof Date) {
-                source = ((Date) source).getTime();
-            }
-        }
-        if (source instanceof Map && isBeanLikeTarget(target, targetClass)) {
-            return FastBeanCopierSupport.copy(source, beanFactory.newInstance(targetClass), this);
+        if (targetClass == Queue.class) {
+            return LinkedList::new;
         }
         try {
-            org.apache.commons.beanutils.Converter converter = getApacheConverter(targetClass);
-            if (converter != null) {
-                return converter.convert(targetClass, source);
-            }
-
-            if (targetClass == Map.class) {
-                if (source instanceof Map) {
-                    return (T) copyMap(((Map<?, ?>) source));
+            Constructor<?> constructor = targetClass.getDeclaredConstructor();
+            constructor.setAccessible(true);
+            return () -> {
+                try {
+                    return (Collection<Object>) constructor.newInstance();
+                } catch (Exception e) {
+                    throw new UnsupportedOperationException("Unsupported Collection Type:" + targetClass, e);
                 }
-                if (source instanceof Collection) {
-                    Collection<?> sourceCollection = (Collection<?>) source;
-                    Map<Object, Object> map = new LinkedHashMap<>(Math.max((int) (sourceCollection.size() / 0.75F) + 1, 16));
-                    int i = 0;
-                    for (Object o : sourceCollection) {
-                        if (genericType != null && genericType.length >= 2) {
-                            map.put(convert(i++, genericType[0], FastBeanCopierSupport.EMPTY_CLASS_ARRAY),
-                                    convert(o, genericType[1], FastBeanCopierSupport.EMPTY_CLASS_ARRAY));
-                        } else {
-                            map.put(i++, o);
-                        }
-                    }
-                    return (T) map;
-                }
-                ClassDescription sourceType = ClassDescriptions.getDescription(source.getClass());
-                return (T) FastBeanCopierSupport.copy(source, Maps.newHashMapWithExpectedSize(sourceType.getFieldSize()));
-            }
-
-            return FastBeanCopierSupport.copy(source, beanFactory.newInstance(targetClass), this);
-        } catch (Throwable e) {
-            log.warn("Copy {} to {} failed", source, targetClass, e);
-            throw e;
+            };
+        } catch (Exception e) {
+            return () -> {
+                throw new UnsupportedOperationException("Unsupported Collection Type:" + targetClass, e);
+            };
         }
     }
 
@@ -216,6 +150,23 @@ final class FastBeanCopierConverterSupport implements Converter {
             return Arrays.asList(((String) source).split("[,]"));
         }
         return Collections.singletonList(source);
+    }
+
+    private Collection<?> convertToCollection(Object source, ConversionPlan plan) {
+        Collection<Object> collection = plan.collectionFactory.create();
+        Collection<?> sourceCollection = asCollection(source);
+        if (plan.elementType != null) {
+            for (Object sourceObj : sourceCollection) {
+                if (sourceObj == null || isDirectAssignable(plan.elementType, sourceObj)) {
+                    collection.add(sourceObj);
+                } else {
+                    collection.add(convert(sourceObj, plan.elementType, FastBeanCopierSupport.EMPTY_CLASS_ARRAY));
+                }
+            }
+            return collection;
+        }
+        collection.addAll(sourceCollection);
+        return collection;
     }
 
     private Object convertToArray(Object source, Class<?> componentType) {
@@ -238,6 +189,20 @@ final class FastBeanCopierConverterSupport implements Converter {
         return array;
     }
 
+    private Map<?, ?> convertCollectionToMap(Collection<?> sourceCollection, ConversionPlan plan) {
+        Map<Object, Object> map = new LinkedHashMap<>(Math.max((int) (sourceCollection.size() / 0.75F) + 1, 16));
+        int i = 0;
+        for (Object o : sourceCollection) {
+            if (plan.mapKeyType != null && plan.mapValueType != null) {
+                map.put(convert(i++, plan.mapKeyType, FastBeanCopierSupport.EMPTY_CLASS_ARRAY),
+                        convert(o, plan.mapValueType, FastBeanCopierSupport.EMPTY_CLASS_ARRAY));
+            } else {
+                map.put(i++, o);
+            }
+        }
+        return map;
+    }
+
     private Map<?, ?> copyMap(Map<?, ?> map) {
         if (map instanceof TreeMap) {
             return new TreeMap<>(map);
@@ -251,20 +216,13 @@ final class FastBeanCopierConverterSupport implements Converter {
         return new HashMap<>(map);
     }
 
-    private Object converterByApache(Class<?> targetClass, Object source) {
-        org.apache.commons.beanutils.Converter converter = getApacheConverter(targetClass);
-        if (converter != null) {
-            return converter.convert(targetClass, source);
-        }
-        return null;
-    }
-
-    private org.apache.commons.beanutils.Converter getApacheConverter(Class<?> targetClass) {
-        org.apache.commons.beanutils.Converter converter = APACHE_CONVERTER_CACHE.computeIfAbsent(targetClass,
-                                                                                                  type -> {
-                                                                                                      org.apache.commons.beanutils.Converter found = CONVERT_UTILS.lookup(type);
-                                                                                                      return found == null ? NO_CONVERTER : found;
-                                                                                                  });
+    private static org.apache.commons.beanutils.Converter lookupApacheConverter(Class<?> targetClass) {
+        org.apache.commons.beanutils.Converter converter =
+            APACHE_CONVERTER_CACHE.computeIfAbsent(targetClass,
+                                                   type -> {
+                                                       org.apache.commons.beanutils.Converter found = CONVERT_UTILS.lookup(type);
+                                                       return found == null ? NO_CONVERTER : found;
+                                                   });
         return converter == NO_CONVERTER ? null : converter;
     }
 
@@ -336,20 +294,21 @@ final class FastBeanCopierConverterSupport implements Converter {
         return false;
     }
 
-    private boolean isBeanLikeTarget(ClassDescription target, Class<?> targetClass) {
-        return targetClass != Object.class
-            && targetClass != String.class
-            && targetClass != CharSequence.class
-            && targetClass != Date.class
-            && targetClass != Boolean.class
-            && targetClass != Character.class
-            && targetClass != boolean.class
-            && targetClass != char.class
-            && !target.isEnumType()
-            && !target.isArrayType()
-            && !target.isCollectionType()
-            && !target.isNumber()
-            && !Map.class.isAssignableFrom(targetClass);
+    private static boolean isBeanLikeTarget(ClassDescription target, Class<?> targetClass) {
+        return BEAN_LIKE_TARGET_CACHE.computeIfAbsent(targetClass,
+                                                      ignore -> targetClass != Object.class
+                                                          && targetClass != String.class
+                                                          && targetClass != CharSequence.class
+                                                          && targetClass != Date.class
+                                                          && targetClass != Boolean.class
+                                                          && targetClass != Character.class
+                                                          && targetClass != boolean.class
+                                                          && targetClass != char.class
+                                                          && !target.isEnumType()
+                                                          && !target.isArrayType()
+                                                          && !target.isCollectionType()
+                                                          && !target.isNumber()
+                                                          && !Map.class.isAssignableFrom(targetClass));
     }
 
     private Number convertNumber(Number source, Class<?> targetClass) {
@@ -412,5 +371,198 @@ final class FastBeanCopierConverterSupport implements Converter {
         }
         String value = String.valueOf(source);
         return value.isEmpty() ? null : value.charAt(0);
+    }
+
+    private interface CollectionFactory {
+        Collection<Object> create();
+    }
+
+    private final class ConversionPlan {
+        private final Class<?> targetClass;
+        private final Class<?>[] genericTypes;
+        private final ClassDescription target;
+        private final org.apache.commons.beanutils.Converter apacheConverter;
+        private final CollectionFactory collectionFactory;
+        private final Class<?> elementType;
+        private final Class<?> mapKeyType;
+        private final Class<?> mapValueType;
+        private final Class<?> componentType;
+        private final boolean stringLike;
+        private final boolean objectType;
+        private final boolean dateType;
+        private final boolean booleanType;
+        private final boolean characterType;
+        private final boolean collectionType;
+        private final boolean enumType;
+        private final boolean arrayType;
+        private final boolean numberType;
+        private final boolean mapInterfaceType;
+        private final boolean beanLikeTarget;
+
+        private ConversionPlan(Class<?> targetClass, Class<?>[] genericTypes) {
+            this.targetClass = targetClass;
+            this.genericTypes = genericTypes;
+            this.target = ClassDescriptions.getDescription(targetClass);
+            this.stringLike = targetClass == String.class || targetClass == CharSequence.class;
+            this.objectType = targetClass == Object.class;
+            this.dateType = targetClass == Date.class;
+            this.booleanType = targetClass == boolean.class || targetClass == Boolean.class;
+            this.characterType = targetClass == char.class || targetClass == Character.class;
+            this.collectionType = target.isCollectionType();
+            this.enumType = target.isEnumType();
+            this.arrayType = target.isArrayType();
+            this.numberType = target.isNumber();
+            this.mapInterfaceType = targetClass == Map.class;
+            this.beanLikeTarget = isBeanLikeTarget(target, targetClass);
+            this.apacheConverter = lookupApacheConverter(targetClass);
+            this.collectionFactory = collectionType ? getCollectionFactory(targetClass) : null;
+            this.elementType = genericTypes.length > 0 && genericTypes[0] != Object.class ? genericTypes[0] : null;
+            this.mapKeyType = genericTypes.length >= 2 ? genericTypes[0] : null;
+            this.mapValueType = genericTypes.length >= 2 ? genericTypes[1] : null;
+            this.componentType = arrayType ? targetClass.getComponentType() : null;
+        }
+
+        @SuppressWarnings("all")
+        private Object convert(FastBeanCopierConverterSupport support, Object source) throws Throwable {
+            if (support.isDirectScalarAssignable(targetClass, source)) {
+                return source;
+            }
+            if (enumType && source instanceof EnumDict) {
+                Object val = ((EnumDict) source).getValue();
+                if (targetClass.isInstance(val)) {
+                    return val;
+                }
+                Object matched = support.lookupEnum(targetClass, val);
+                if (matched == null) {
+                    matched = support.lookupEnum(targetClass, ((EnumDict<?>) source).getText());
+                }
+                if (matched != null) {
+                    return matched;
+                }
+                return support.convert(val, targetClass, genericTypes);
+            }
+            if (stringLike) {
+                if (source instanceof Date) {
+                    return DateFormatter.toString(((Date) source), "yyyy-MM-dd HH:mm:ss");
+                }
+                return String.valueOf(source);
+            }
+            if (objectType) {
+                return source;
+            }
+            if (dateType) {
+                if (source instanceof String) {
+                    Object parsed = DateFormatter.fromString((String) source);
+                    if (parsed == null) {
+                        return apacheConverter == null ? null : apacheConverter.convert(Date.class, source);
+                    }
+                    return parsed;
+                }
+                if (source instanceof Number) {
+                    return new Date(((Number) source).longValue());
+                }
+                if (source instanceof Date) {
+                    return new Date(((Date) source).getTime());
+                }
+            }
+            if (booleanType) {
+                return support.convertToBoolean(source);
+            }
+            if (characterType) {
+                return support.convertToCharacter(source);
+            }
+            if (collectionType) {
+                return support.convertToCollection(source, this);
+            }
+            if (enumType) {
+                Object val = support.lookupEnum(targetClass, source);
+                if (val != null) {
+                    if (targetClass.isInstance(val)) {
+                        return val;
+                    }
+                    return support.convert(val, targetClass, genericTypes);
+                }
+                log.warn("无法将:{}转为枚举:{}",
+                         source,
+                         targetClass,
+                         new ClassCastException(source + "=>" + targetClass));
+                return null;
+            }
+            if (arrayType) {
+                return support.convertToArray(source, componentType);
+            }
+            if (numberType) {
+                if (source instanceof Number) {
+                    return support.convertNumber((Number) source, targetClass);
+                }
+                if (source instanceof String) {
+                    return support.convertStringToNumber((String) source, targetClass);
+                }
+                if (source instanceof Date) {
+                    source = ((Date) source).getTime();
+                }
+            }
+            if (beanLikeTarget && source instanceof Map) {
+                return FastBeanCopierSupport.copy(source, support.beanFactory.newInstance(targetClass), support);
+            }
+            try {
+                if (apacheConverter != null) {
+                    return apacheConverter.convert(targetClass, source);
+                }
+                if (mapInterfaceType) {
+                    if (source instanceof Map) {
+                        return support.copyMap((Map<?, ?>) source);
+                    }
+                    if (source instanceof Collection) {
+                        return support.convertCollectionToMap((Collection<?>) source, this);
+                    }
+                    ClassDescription sourceType = ClassDescriptions.getDescription(source.getClass());
+                    return FastBeanCopierSupport.copy(source, Maps.newHashMapWithExpectedSize(sourceType.getFieldSize()));
+                }
+                return FastBeanCopierSupport.copy(source, support.beanFactory.newInstance(targetClass), support);
+            } catch (Throwable e) {
+                log.warn("Copy {} to {} failed", source, targetClass, e);
+                throw e;
+            }
+        }
+    }
+
+    private static final class PlanKey {
+        private final Class<?> targetClass;
+        private final Class<?>[] genericTypes;
+
+        private PlanKey(Class<?> targetClass, Class<?>[] genericTypes) {
+            this.targetClass = targetClass;
+            this.genericTypes = genericTypes;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) {
+                return true;
+            }
+            if (!(obj instanceof PlanKey)) {
+                return false;
+            }
+            PlanKey that = (PlanKey) obj;
+            return targetClass == that.targetClass && Arrays.equals(genericTypes, that.genericTypes);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * System.identityHashCode(targetClass) + Arrays.hashCode(genericTypes);
+        }
+
+        private boolean involves(ClassLoader loader) {
+            if (FastBeanCopierSupport.isClassLoaderMatch(targetClass, loader)) {
+                return true;
+            }
+            for (Class<?> genericType : genericTypes) {
+                if (FastBeanCopierSupport.isClassLoaderMatch(genericType, loader)) {
+                    return true;
+                }
+            }
+            return false;
+        }
     }
 }

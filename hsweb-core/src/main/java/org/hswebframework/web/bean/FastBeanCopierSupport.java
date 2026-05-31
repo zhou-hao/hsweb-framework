@@ -18,6 +18,15 @@ import java.util.function.Supplier;
  */
 public final class FastBeanCopierSupport {
     private static final Map<CacheKey, Copier> CACHE = new ConcurrentHashMap<>();
+    private static final Map<CacheKey, FastBeanCopierBackend> BACKEND_CACHE = new ConcurrentHashMap<>();
+    /**
+     * 动态 classloader 也保持强缓存命中，避免弱/软引用在内存波动时触发 copier 重建。
+     * 对应 classloader 的释放由 clearCache(ClassLoader) 显式管理。
+     */
+    private static final Map<CacheKey, Copier> VOLATILE_CACHE = new ConcurrentHashMap<>();
+    private static final ClassLoader OWNER_CLASS_LOADER = FastBeanCopierSupport.class.getClassLoader();
+    private static final FastBeanCopierBackend VOLATILE_CLASS_LOADER_BACKEND =
+        new ReflectionAccessorFastBeanCopierBackend();
 
     @SuppressWarnings("all")
     public static final Class[] EMPTY_CLASS_ARRAY = new Class[0];
@@ -46,16 +55,24 @@ public final class FastBeanCopierSupport {
         return BACKEND;
     }
 
+    static FastBeanCopierBackend getEffectiveBackend(Class<?> source, Class<?> target) {
+        if (usesVolatileClassLoader(source, target)) {
+            return adaptBackend(BACKEND, source, target);
+        }
+        CacheKey key = createCacheKey(source, target);
+        return BACKEND_CACHE.computeIfAbsent(key, ignore -> adaptBackend(BACKEND, source, target));
+    }
+
     static {
         BEAN_FACTORY = new BeanFactory() {
             @Override
             @SneakyThrows
             @SuppressWarnings("all")
             public <T> T newInstance(Class<T> beanType) {
-                return beanType == Map.class ? (T) new HashMap<>() : beanType.newInstance();
+                return beanType == Map.class ? (T) new HashMap<>() : beanType.getDeclaredConstructor().newInstance();
             }
         };
-        BACKEND = new JavassistFastBeanCopierBackend();
+        BACKEND = FastBeanCopierBackendSelector.selectDefaultBackend();
         DEFAULT_CONVERT = new DefaultConverter();
         DEFAULT_CONVERT.setBeanFactory(BEAN_FACTORY);
     }
@@ -144,6 +161,9 @@ public final class FastBeanCopierSupport {
         Class<?> sourceType = getUserClass(source);
         Class<?> targetType = getUserClass(target);
         CacheKey key = createCacheKey(sourceType, targetType);
+        if (usesVolatileClassLoader(sourceType, targetType)) {
+            return getVolatileCopier(key, autoCreate);
+        }
         if (autoCreate) {
             return CACHE.computeIfAbsent(key, k -> createCopier(k.sourceType, k.targetType));
         }
@@ -155,7 +175,30 @@ public final class FastBeanCopierSupport {
     }
 
     public static Copier createCopier(Class<?> source, Class<?> target) {
-        return BACKEND.createCopier(source, target);
+        return getEffectiveBackend(source, target).createCopier(source, target);
+    }
+
+    static boolean usesVolatileClassLoader(Class<?>... types) {
+        for (Class<?> type : types) {
+            if (isVolatileClassLoaderType(type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean isClassLoaderMatch(Class<?> type, ClassLoader loader) {
+        return loader != null && getClassLoader(type) == loader;
+    }
+
+    static ClassLoader getClassLoader(Class<?> type) {
+        if (type == null) {
+            return null;
+        }
+        while (type.isArray()) {
+            type = type.getComponentType();
+        }
+        return type.isPrimitive() ? null : type.getClassLoader();
     }
 
     public static Object unwrapEnumDictValue(Object value, Class<?> targetType) {
@@ -172,6 +215,40 @@ public final class FastBeanCopierSupport {
 
     static void clearCache() {
         CACHE.clear();
+        BACKEND_CACHE.clear();
+        VOLATILE_CACHE.clear();
+        AccessorFastBeanCopierBackend.clearCache();
+        FastBeanCopierConverterSupport.clearCache();
+        ClassDescriptions.clearCache();
+    }
+
+    public static void clearCache(ClassLoader loader) {
+        if (loader == null) {
+            clearCache();
+            return;
+        }
+        removeCacheEntries(CACHE, loader);
+        removeCacheEntries(BACKEND_CACHE, loader);
+        removeVolatileCacheEntries(loader);
+        AccessorFastBeanCopierBackend.clearCache(loader);
+        FastBeanCopierConverterSupport.clearCache(loader);
+        ClassDescriptions.clearCache(loader);
+    }
+
+    private static FastBeanCopierBackend adaptBackend(FastBeanCopierBackend backend, Class<?> source, Class<?> target) {
+        if (usesVolatileClassLoader(source, target)) {
+            if (backend instanceof AsmAccessorFastBeanCopierBackend || backend instanceof JavassistFastBeanCopierBackend) {
+                return VOLATILE_CLASS_LOADER_BACKEND;
+            }
+            return backend;
+        }
+        if (!FastBeanCopierBackendSelector.isRuntimeCodeGenerationDisabled()) {
+            return backend;
+        }
+        if (backend instanceof AsmAccessorFastBeanCopierBackend || backend instanceof JavassistFastBeanCopierBackend) {
+            return new ReflectionAccessorFastBeanCopierBackend();
+        }
+        return backend;
     }
 
     public static final class DefaultConverter implements Converter {
@@ -189,6 +266,44 @@ public final class FastBeanCopierSupport {
         public <T> T convert(Object source, Class<T> targetClass, Class[] genericType) {
             return support.convert(source, targetClass, genericType);
         }
+    }
+
+    private static Copier getVolatileCopier(CacheKey key, boolean autoCreate) {
+        if (!autoCreate) {
+            return VOLATILE_CACHE.get(key);
+        }
+        return VOLATILE_CACHE.computeIfAbsent(key, ignore -> createCopier(key.sourceType, key.targetType));
+    }
+
+    private static void removeCacheEntries(Map<CacheKey, ?> cache, ClassLoader loader) {
+        cache.keySet().removeIf(key -> key.involves(loader));
+    }
+
+    private static void removeVolatileCacheEntries(ClassLoader loader) {
+        removeCacheEntries(VOLATILE_CACHE, loader);
+    }
+
+    static boolean isVolatileClassLoaderType(Class<?> type) {
+        ClassLoader loader = getClassLoader(type);
+        if (loader == null || loader == OWNER_CLASS_LOADER) {
+            return false;
+        }
+        if (OWNER_CLASS_LOADER == null) {
+            return true;
+        }
+        try {
+            return Class.forName(type.getName(), false, OWNER_CLASS_LOADER) != type;
+        } catch (Throwable ignore) {
+            return true;
+        }
+    }
+
+    static int getStableCacheSize() {
+        return CACHE.size();
+    }
+
+    static int getVolatileCacheSize() {
+        return VOLATILE_CACHE.size();
     }
 
     @AllArgsConstructor
@@ -213,5 +328,10 @@ public final class FastBeanCopierSupport {
             result = 31 * result + (this.sourceType != null ? this.sourceType.hashCode() : 0);
             return result;
         }
+
+        private boolean involves(ClassLoader loader) {
+            return isClassLoaderMatch(sourceType, loader) || isClassLoaderMatch(targetType, loader);
+        }
     }
+
 }

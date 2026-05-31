@@ -15,11 +15,17 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
 
     private static final Map<Class<?>, Class<?>> PRIMITIVE_WRAPPERS = new HashMap<>();
+    /**
+     * GenericKey 为瞬时组合 key，不能使用弱键缓存，否则 key 本身很容易被回收并导致热路径重复解析泛型。
+     * 这里改用强缓存，通过 clearCache(ClassLoader) 显式回收动态 classloader 关联条目。
+     */
+    private static final Map<GenericKey, Class<?>[]> GENERIC_CACHE = new ConcurrentHashMap<>();
 
     static {
         PRIMITIVE_WRAPPERS.put(byte.class, Byte.class);
@@ -36,6 +42,18 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
 
     protected AccessorFastBeanCopierBackend(PropertyAccessor propertyAccessor) {
         this.propertyAccessor = Objects.requireNonNull(propertyAccessor, "propertyAccessor");
+    }
+
+    static void clearCache() {
+        GENERIC_CACHE.clear();
+    }
+
+    static void clearCache(ClassLoader loader) {
+        if (loader == null) {
+            clearCache();
+            return;
+        }
+        GENERIC_CACHE.keySet().removeIf(key -> key.involves(loader));
     }
 
     @Override
@@ -344,18 +362,20 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
             if (Map.class.isAssignableFrom(property.getBeanType())) {
                 return FastBeanCopierSupport.EMPTY_CLASS_ARRAY;
             }
-            Field field = ReflectionUtils.findField(target, property.getName());
-            if (field == null) {
-                field = ReflectionUtils.findField(property.getBeanType(), property.getName());
-            }
-            if (field == null) {
-                return FastBeanCopierSupport.EMPTY_CLASS_ARRAY;
-            }
-            Class<?>[] arr = Arrays.stream(ResolvableType.forField(field).getGenerics())
-                .map(ResolvableType::getRawClass)
-                .filter(Objects::nonNull)
-                .toArray(Class[]::new);
-            return arr.length == 0 ? FastBeanCopierSupport.EMPTY_CLASS_ARRAY : arr;
+            return GENERIC_CACHE.computeIfAbsent(new GenericKey(target, property.getBeanType(), property.getName()), key -> {
+                Field field = ReflectionUtils.findField(key.targetType, key.propertyName);
+                if (field == null) {
+                    field = ReflectionUtils.findField(key.beanType, key.propertyName);
+                }
+                if (field == null) {
+                    return FastBeanCopierSupport.EMPTY_CLASS_ARRAY;
+                }
+                Class<?>[] arr = Arrays.stream(ResolvableType.forField(field).getGenerics())
+                    .map(ResolvableType::getRawClass)
+                    .filter(Objects::nonNull)
+                    .toArray(Class[]::new);
+                return arr.length == 0 ? FastBeanCopierSupport.EMPTY_CLASS_ARRAY : arr;
+            });
         }
 
         private static PropertyTransfer createAccessorTransfer(FastBeanCopierPropertySupport.ClassProperty sourceProperty,
@@ -765,5 +785,44 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
 
     interface ValueWriter {
         void write(Object target, Object value) throws Throwable;
+    }
+
+    private static final class GenericKey {
+        private final Class<?> targetType;
+        private final Class<?> beanType;
+        private final String propertyName;
+
+        private GenericKey(Class<?> targetType, Class<?> beanType, String propertyName) {
+            this.targetType = targetType;
+            this.beanType = beanType;
+            this.propertyName = propertyName;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) {
+                return true;
+            }
+            if (!(obj instanceof GenericKey)) {
+                return false;
+            }
+            GenericKey that = (GenericKey) obj;
+            return targetType == that.targetType
+                && beanType == that.beanType
+                && Objects.equals(propertyName, that.propertyName);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = System.identityHashCode(targetType);
+            result = 31 * result + System.identityHashCode(beanType);
+            result = 31 * result + propertyName.hashCode();
+            return result;
+        }
+
+        private boolean involves(ClassLoader loader) {
+            return FastBeanCopierSupport.isClassLoaderMatch(targetType, loader)
+                || FastBeanCopierSupport.isClassLoaderMatch(beanType, loader);
+        }
     }
 }

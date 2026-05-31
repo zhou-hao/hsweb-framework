@@ -82,6 +82,14 @@ public final class FastBeanCopier {
         return FastBeanCopierSupport.createCopier(source, target);
     }
 
+    public static void clearCache() {
+        FastBeanCopierSupport.clearCache();
+    }
+
+    public static void clearCache(ClassLoader loader) {
+        FastBeanCopierSupport.clearCache(loader);
+    }
+
     /**
      * @deprecated 请改用 {@link FastBeanCopierSupport.DefaultConverter}
      */
