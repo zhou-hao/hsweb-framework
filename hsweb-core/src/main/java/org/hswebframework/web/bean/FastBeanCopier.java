@@ -23,6 +23,7 @@ import org.springframework.util.ReflectionUtils;
 import java.beans.PropertyDescriptor;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.lang.reflect.RecordComponent;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -39,6 +40,8 @@ import java.util.stream.Stream;
 @Slf4j
 public final class FastBeanCopier {
     private static final Map<CacheKey, Copier> CACHE = new ConcurrentHashMap<>();
+
+    private static final Map<CacheKey, RecordCopier> RECORD_CACHE = new ConcurrentHashMap<>();
 
     private static final PropertyUtilsBean propertyUtils = BeanUtilsBean.getInstance().getPropertyUtils();
 
@@ -112,6 +115,9 @@ public final class FastBeanCopier {
 
     @SneakyThrows
     public static <T, S> T copy(S source, Class<T> target, String... ignore) {
+        if (target.isRecord()) {
+            return copyToRecord(source, target, DEFAULT_CONVERT, ignore);
+        }
         return copy(source, target.newInstance(), DEFAULT_CONVERT, ignore);
     }
 
@@ -125,6 +131,10 @@ public final class FastBeanCopier {
 
     @SuppressWarnings("all")
     public static <T, S> T copy(S source, T target, Converter converter, Set<String> ignore) {
+        if (target != null && getUserClass(target).isRecord()) {
+            // record 不可变，无法写入已存在实例；这里按组件名重新构造并返回新实例。
+            return (T) copyToRecord(source, (Class) getUserClass(target), converter, ignore);
+        }
         if (source instanceof Map && target instanceof Map) {
             if (CollectionUtils.isEmpty(ignore)) {
                 ((Map) target).putAll(((Map) source));
@@ -142,6 +152,45 @@ public final class FastBeanCopier {
         getCopier(source, target, true)
             .copy(source, target, ignore, converter);
         return target;
+    }
+
+    static <T, S> T copyToRecord(S source, Class<T> target, Converter converter, String... ignore) {
+        Set<String> ignored = (ignore == null || ignore.length == 0)
+            ? Collections.emptySet()
+            : new HashSet<>(Arrays.asList(ignore));
+        return copyToRecord(source, target, converter, ignored);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <T, S> T copyToRecord(S source, Class<T> target, Converter converter, Set<String> ignore) {
+        return (T) getRecordCopier(getUserClass(source), target)
+            .copy(source, ignore == null ? Collections.emptySet() : ignore, converter);
+    }
+
+    private static RecordCopier getRecordCopier(Class<?> source, Class<?> target) {
+        CacheKey key = createCacheKey(source, target);
+        return RECORD_CACHE.computeIfAbsent(key, k -> createRecordCopier(k.sourceType, k.targetType));
+    }
+
+    private static RecordCopier createRecordCopier(Class<?> source, Class<?> target) {
+        String method = "public Object copy(Object s, java.util.Set ignore, " +
+            "org.hswebframework.web.bean.Converter converter){\n" +
+            "try{\n\t" +
+            createRecordCopierCode(source, target) +
+            "}catch(Throwable e){\n" +
+            "\tthrow new UnsupportedOperationException(e.getMessage(), e);" +
+            "\n}\n" +
+            "\n}";
+        try {
+            @SuppressWarnings("all")
+            Proxy<RecordCopier> proxy = Proxy
+                .create(RecordCopier.class, new Class[]{source, target})
+                .addMethod(method);
+            return proxy.newInstance();
+        } catch (Exception e) {
+            log.error("创建record copy代理对象失败:\n{}", method, e);
+            throw new UnsupportedOperationException(e.getMessage(), e);
+        }
     }
 
     static Class<?> getUserClass(Object object) {
@@ -220,6 +269,10 @@ public final class FastBeanCopier {
 
     private static Map<String, ClassProperty> createProperty(Class<?> type) {
 
+        if (type.isRecord()) {
+            return createRecordProperty(type);
+        }
+
         List<String> fieldNames = Arrays
             .stream(type.getDeclaredFields())
             .map(Field::getName)
@@ -236,12 +289,84 @@ public final class FastBeanCopier {
 
     }
 
+    private static Map<String, ClassProperty> createRecordProperty(Class<?> type) {
+        return Arrays.stream(type.getRecordComponents())
+                     .map(RecordClassProperty::new)
+                     .collect(Collectors.toMap(ClassProperty::getName,
+                                               Function.identity(),
+                                               (k, k2) -> k,
+                                               LinkedHashMap::new));
+    }
+
     private static Map<String, ClassProperty> createMapProperty(Map<String, ClassProperty> template) {
         return template
             .values()
             .stream()
             .map(classProperty -> new MapClassProperty(classProperty.name))
             .collect(Collectors.toMap(ClassProperty::getName, Function.identity(), (k, k2) -> k, LinkedHashMap::new));
+    }
+
+    private static String createRecordCopierCode(Class<?> source, Class<?> target) {
+        Map<String, ClassProperty> sourceProperties = Map.class.isAssignableFrom(source)
+            ? createMapProperty(createRecordProperty(target))
+            : createProperty(source);
+        String sourceTypeName = getTypeName(source);
+        String targetTypeName = getTypeName(target);
+        boolean sourceIsMap = Map.class.isAssignableFrom(source);
+        StringBuilder code = new StringBuilder();
+        code.append(sourceTypeName).append(" $$__source=(").append(sourceTypeName).append(")s;\n\t");
+
+        RecordComponent[] components = target.getRecordComponents();
+        List<String> constructorArgs = new ArrayList<>(components.length);
+        for (RecordComponent component : components) {
+            String name = component.getName();
+            Class<?> type = component.getType();
+            String typeName = getTypeName(type);
+            String varName = "$$__" + name;
+            code.append(typeName).append(" ").append(varName).append("=").append(defaultValueCode(type)).append(";\n\t");
+            code.append("if(!ignore.contains(\"").append(name).append("\")){\n\t\t");
+
+            ClassProperty sourceProperty = sourceProperties.get(name);
+            if (sourceProperty == null) {
+                code.append("// source property not found, keep default value.\n\t");
+                code.append("}\n\t");
+                constructorArgs.add(varName);
+                continue;
+            }
+
+            String valueExpression = sourceIsMap
+                ? "$$__source.get(\"" + name + "\")"
+                : "$$__source." + sourceProperty.getReadMethod();
+            if (sourceProperty.isPrimitive()) {
+                valueExpression = wrapperClassMapping
+                    .get(sourceProperty.getType())
+                    .getName() + ".valueOf(" + valueExpression + ")";
+            }
+            String generic = resolveRecordGenericCode(component);
+            code.append("Object $$__value=(Object)(").append(valueExpression).append(");\n\t\t");
+            code.append("if($$__value!=null){\n\t\t\t");
+            if (requiresRecordGenericConversion(component, type)) {
+                code.append(varName).append("=").append(convertValueCode(type, generic)).append(";\n\t\t");
+            } else {
+                code.append("if(").append(directAssignableCode(type, "$$__value")).append("){\n\t\t\t");
+                code.append(varName).append("=").append(castValueCode(type, "$$__value")).append(";\n\t\t\t");
+                code.append("}else{\n\t\t\t");
+                code.append(varName).append("=").append(convertValueCode(type, generic)).append(";\n\t\t\t");
+                code.append("}\n\t\t");
+            }
+            code.append("}\n\t");
+            code.append("}\n\t");
+            constructorArgs.add(varName);
+        }
+        code.append("return new ").append(targetTypeName).append("(")
+            .append(String.join(",", constructorArgs))
+            .append(");\n");
+        return code.toString();
+    }
+
+    private static boolean requiresRecordGenericConversion(RecordComponent component, Class<?> type) {
+        return ResolvableType.forType(component.getGenericType()).hasGenerics()
+            && (Collection.class.isAssignableFrom(type) || Map.class.isAssignableFrom(type));
     }
 
     private static String createCopierCode(Class<?> source, Class<?> target) {
@@ -521,6 +646,21 @@ public final class FastBeanCopier {
         }
     }
 
+    static class RecordClassProperty extends ClassProperty {
+        public RecordClassProperty(RecordComponent component) {
+            type = component.getType();
+            readMethodName = component.getAccessor().getName();
+            writeMethodName = null;
+
+            getter = createGetterFunction();
+            setter = createSetterFunction(paramGetter -> {
+                throw new UnsupportedOperationException("Record property is read-only: " + component.getName());
+            });
+            name = component.getName();
+            beanType = component.getDeclaringRecord();
+        }
+    }
+
     static class MapClassProperty extends ClassProperty {
         public MapClassProperty(String name) {
             type = Object.class;
@@ -544,6 +684,78 @@ public final class FastBeanCopier {
         }
     }
 
+
+    private static String resolveRecordGenericCode(RecordComponent component) {
+        Class<?>[] genericTypes = Arrays.stream(ResolvableType.forType(component.getGenericType()).getGenerics())
+                                        .map(ResolvableType::getRawClass)
+                                        .filter(Objects::nonNull)
+                                        .toArray(Class[]::new);
+        if (genericTypes.length == 0) {
+            return "org.hswebframework.web.bean.FastBeanCopier.EMPTY_CLASS_ARRAY";
+        }
+        return "new Class[]{" + Arrays.stream(genericTypes)
+                                      .map(type -> getTypeName(type) + ".class")
+                                      .collect(Collectors.joining(",")) + "}";
+    }
+
+    private static String getTypeName(Class<?> type) {
+        if (type.isArray()) {
+            return getTypeName(type.getComponentType()) + "[]";
+        }
+        return type.getName();
+    }
+
+    private static String defaultValueCode(Class<?> type) {
+        if (!type.isPrimitive()) {
+            return "null";
+        }
+        if (type == boolean.class) {
+            return "false";
+        }
+        if (type == char.class) {
+            return "(char)0";
+        }
+        if (type == byte.class) {
+            return "(byte)0";
+        }
+        if (type == short.class) {
+            return "(short)0";
+        }
+        if (type == long.class) {
+            return "0L";
+        }
+        if (type == float.class) {
+            return "0F";
+        }
+        if (type == double.class) {
+            return "0D";
+        }
+        return "0";
+    }
+
+    private static String castValueCode(Class<?> type, String value) {
+        if (!type.isPrimitive()) {
+            return "(" + getTypeName(type) + ")" + value;
+        }
+        Class<?> wrapper = wrapperClassMapping.get(type);
+        return "((" + wrapper.getName() + ")" + value + ")." + type.getName() + "Value()";
+    }
+
+    private static String convertValueCode(Class<?> type, String generic) {
+        String converted = "converter.convert($$__value," + getTypeName(type) + ".class," + generic + ")";
+        if (!type.isPrimitive()) {
+            return "(" + getTypeName(type) + ")" + converted;
+        }
+        Class<?> wrapper = wrapperClassMapping.get(type);
+        return "((" + wrapper.getName() + ")" + converted + ")." + type.getName() + "Value()";
+    }
+
+    private static String directAssignableCode(Class<?> type, String value) {
+        Class<?> directType = type.isPrimitive()
+            ? wrapperClassMapping.get(type)
+            : type;
+        return value + " instanceof " + getTypeName(directType);
+    }
 
     public static final class DefaultConverter implements Converter {
         private BeanFactory beanFactory = BEAN_FACTORY;
@@ -696,6 +908,9 @@ public final class FastBeanCopier {
                 if (source instanceof Date) {
                     source = ((Date) source).getTime();
                 }
+            }
+            if (targetClass.isRecord()) {
+                return copyToRecord(source, targetClass, this, Collections.emptySet());
             }
             try {
                 org.apache.commons.beanutils.Converter converter = convertUtils.lookup(targetClass);
