@@ -6,6 +6,7 @@ import lombok.Setter;
 import lombok.SneakyThrows;
 import org.hswebframework.ezorm.core.DefaultExtendable;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Test;
 import org.springframework.util.ClassUtils;
 
@@ -15,7 +16,11 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -174,6 +179,105 @@ public class FastBeanCopierTest {
         public String toString() {
             return "name:" + name;
         }
+    }
+
+    @Test
+    @SneakyThrows
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void testRecordCopy() {
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        Assume.assumeNotNull(compiler);
+
+        File sourceDir = new File("target/generated-test-records/src/org/hswebframework/web/bean/recordcopy");
+        File classesDir = new File("target/generated-test-records/classes");
+        sourceDir.mkdirs();
+        classesDir.mkdirs();
+
+        File nestedFile = writeRecordSource(sourceDir,
+                                            "NestedRecord.java",
+                                            "package org.hswebframework.web.bean.recordcopy;\n" +
+                                                "public record NestedRecord(String name) { }\n");
+        File sourceFile = writeRecordSource(sourceDir,
+                                            "SourceRecord.java",
+                                            "package org.hswebframework.web.bean.recordcopy;\n" +
+                                                "import org.hswebframework.web.bean.Color;\n" +
+                                                "public record SourceRecord(String name, int age, Color color2, NestedRecord nested) { }\n");
+        File targetFile = writeRecordSource(sourceDir,
+                                            "TargetRecord.java",
+                                            "package org.hswebframework.web.bean.recordcopy;\n" +
+                                                "import java.util.List;\n" +
+                                                "import org.hswebframework.web.bean.Color;\n" +
+                                                "public record TargetRecord(String name, int age, Color color2, NestedRecord nested, List<NestedRecord> nestedList) { }\n");
+
+        int exit = compiler.run(null,
+                                null,
+                                null,
+                                "--release",
+                                "17",
+                                "-classpath",
+                                System.getProperty("java.class.path"),
+                                "-d",
+                                classesDir.getAbsolutePath(),
+                                nestedFile.getAbsolutePath(),
+                                sourceFile.getAbsolutePath(),
+                                targetFile.getAbsolutePath());
+        Assume.assumeTrue("Current JDK does not support compiling record test classes", exit == 0);
+
+        try (URLClassLoader loader = new URLClassLoader(new URL[]{classesDir.toURI().toURL()},
+                                                        ClassUtils.getDefaultClassLoader())) {
+            Class<?> nestedClass = loader.loadClass("org.hswebframework.web.bean.recordcopy.NestedRecord");
+            Class<?> sourceClass = loader.loadClass("org.hswebframework.web.bean.recordcopy.SourceRecord");
+            Class<?> targetClass = loader.loadClass("org.hswebframework.web.bean.recordcopy.TargetRecord");
+
+            Map<String, Object> values = new LinkedHashMap<>();
+            values.put("name", "record-target");
+            values.put("age", "18");
+            values.put("color2", "RED");
+            values.put("nested", Collections.singletonMap("name", "nested-map"));
+            values.put("nestedList", Collections.singletonList(Collections.singletonMap("name", "nested-list")));
+
+            Object target = FastBeanCopier.copy(values, (Class) targetClass);
+            Assert.assertEquals("record-target", invokeAccessor(target, "name"));
+            Assert.assertEquals(18, invokeAccessor(target, "age"));
+            Assert.assertEquals(Color.RED, invokeAccessor(target, "color2"));
+            Assert.assertEquals("nested-map", invokeAccessor(invokeAccessor(target, "nested"), "name"));
+            List<?> nestedList = (List<?>) invokeAccessor(target, "nestedList");
+            Assert.assertEquals("nested-list", invokeAccessor(nestedList.get(0), "name"));
+
+            Object ignored = FastBeanCopier.copy(values, (Class) targetClass, "age");
+            Assert.assertEquals(0, invokeAccessor(ignored, "age"));
+
+            Object nested = nestedClass.getDeclaredConstructor(String.class).newInstance("nested-source");
+            Object source = sourceClass
+                .getDeclaredConstructor(String.class, int.class, Color.class, nestedClass)
+                .newInstance("record-source", 20, Color.BLUE, nested);
+
+            Target beanTarget = FastBeanCopier.copy(source, new Target());
+            Assert.assertEquals("record-source", beanTarget.getName());
+            Assert.assertEquals(20, beanTarget.getAge());
+            Assert.assertEquals(Color.BLUE, beanTarget.getColor2());
+
+            Map<String, Object> copiedMap = FastBeanCopier.copy(source, new HashMap<>());
+            Assert.assertEquals("record-source", copiedMap.get("name"));
+            Assert.assertEquals(20, copiedMap.get("age"));
+
+            Object emptyTarget = targetClass
+                .getDeclaredConstructor(String.class, int.class, Color.class, nestedClass, List.class)
+                .newInstance("old", 1, Color.BLUE, nested, Collections.emptyList());
+            Object rebuilt = FastBeanCopier.copy(values, emptyTarget);
+            Assert.assertNotSame(emptyTarget, rebuilt);
+            Assert.assertEquals("record-target", invokeAccessor(rebuilt, "name"));
+        }
+    }
+
+    private File writeRecordSource(File sourceDir, String fileName, String source) throws IOException {
+        File file = new File(sourceDir, fileName);
+        Files.write(file.toPath(), source.getBytes(StandardCharsets.UTF_8));
+        return file;
+    }
+
+    private Object invokeAccessor(Object target, String name) throws Exception {
+        return target.getClass().getMethod(name).invoke(target);
     }
 
     @Test

@@ -21,7 +21,10 @@ import org.springframework.util.ReflectionUtils;
 
 import java.beans.PropertyDescriptor;
 import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Type;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
@@ -110,6 +113,9 @@ public final class FastBeanCopier {
 
     @SneakyThrows
     public static <T, S> T copy(S source, Class<T> target, String... ignore) {
+        if (isRecordType(target)) {
+            return copyToRecord(source, target, DEFAULT_CONVERT, ignore);
+        }
         return copy(source, target.newInstance(), DEFAULT_CONVERT, ignore);
     }
 
@@ -123,6 +129,10 @@ public final class FastBeanCopier {
 
     @SuppressWarnings("all")
     public static <T, S> T copy(S source, T target, Converter converter, Set<String> ignore) {
+        if (target != null && isRecordType(getUserClass(target))) {
+            // Java 8 基线不能直接引用 RecordComponent；record 不可变，只能重建新实例。
+            return (T) copyToRecord(source, (Class) getUserClass(target), converter, ignore);
+        }
         if (source instanceof Map && target instanceof Map) {
             if (CollectionUtils.isEmpty(ignore)) {
                 ((Map) target).putAll(((Map) source));
@@ -140,6 +150,52 @@ public final class FastBeanCopier {
         getCopier(source, target, true)
             .copy(source, target, ignore, converter);
         return target;
+    }
+
+    @SneakyThrows
+    static <T, S> T copyToRecord(S source, Class<T> target, Converter converter, String... ignore) {
+        Set<String> ignored = (ignore == null || ignore.length == 0)
+            ? Collections.emptySet()
+            : new HashSet<>(Arrays.asList(ignore));
+        return copyToRecord(source, target, converter, ignored);
+    }
+
+    @SneakyThrows
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static <T, S> T copyToRecord(S source, Class<T> target, Converter converter, Set<String> ignore) {
+        // record 没有无参构造和 setter，只能按 canonical constructor 的组件顺序组装参数。
+        Object[] components = getRecordComponents(target);
+        Class<?>[] constructorTypes = new Class<?>[components.length];
+        Object[] values = new Object[components.length];
+        Map<String, ClassProperty> sourceProperties = source instanceof Map
+            ? Collections.emptyMap()
+            : createProperty(getUserClass(source));
+
+        for (int i = 0; i < components.length; i++) {
+            Object component = components[i];
+            String name = getRecordComponentName(component);
+            Class<?> componentType = getRecordComponentType(component);
+            constructorTypes[i] = componentType;
+            if (ignore != null && ignore.contains(name)) {
+                values[i] = defaultValue(componentType);
+                continue;
+            }
+            Object value = readRecordSourceValue(source, sourceProperties, name);
+            if (value != null) {
+                Class[] genericTypes = resolveRecordGenericTypes(component);
+                boolean requiresGenericConversion = genericTypes.length > 0
+                    && (Collection.class.isAssignableFrom(componentType) || Map.class.isAssignableFrom(componentType));
+                if (requiresGenericConversion || !isDirectAssignable(componentType, value)) {
+                    value = converter.convert(value, (Class) componentType, genericTypes);
+                }
+            }
+            values[i] = value == null && componentType.isPrimitive()
+                ? defaultValue(componentType)
+                : value;
+        }
+        Constructor<T> constructor = target.getDeclaredConstructor(constructorTypes);
+        ReflectionUtils.makeAccessible(constructor);
+        return constructor.newInstance(values);
     }
 
     static Class<?> getUserClass(Object object) {
@@ -218,6 +274,10 @@ public final class FastBeanCopier {
 
     private static Map<String, ClassProperty> createProperty(Class<?> type) {
 
+        if (isRecordType(type)) {
+            return createRecordProperty(type);
+        }
+
         List<String> fieldNames = Arrays
             .stream(type.getDeclaredFields())
             .map(Field::getName)
@@ -232,6 +292,15 @@ public final class FastBeanCopier {
                      .sorted(Comparator.comparing(property -> fieldNames.indexOf(property.name)))
                      .collect(Collectors.toMap(ClassProperty::getName, Function.identity(), (k, k2) -> k, LinkedHashMap::new));
 
+    }
+
+    private static Map<String, ClassProperty> createRecordProperty(Class<?> type) {
+        return Arrays.stream(getRecordComponents(type))
+                     .map(RecordClassProperty::new)
+                     .collect(Collectors.toMap(ClassProperty::getName,
+                                               Function.identity(),
+                                               (k, k2) -> k,
+                                               LinkedHashMap::new));
     }
 
     private static Map<String, ClassProperty> createMapProperty(Map<String, ClassProperty> template) {
@@ -517,6 +586,22 @@ public final class FastBeanCopier {
         }
     }
 
+    static class RecordClassProperty extends ClassProperty {
+        public RecordClassProperty(Object component) {
+            type = getRecordComponentType(component);
+            Method accessor = getRecordComponentAccessor(component);
+            readMethodName = accessor.getName();
+            writeMethodName = null;
+
+            getter = createGetterFunction();
+            setter = createSetterFunction(paramGetter -> {
+                throw new UnsupportedOperationException("Record property is read-only: " + getRecordComponentName(component));
+            });
+            name = getRecordComponentName(component);
+            beanType = accessor.getDeclaringClass();
+        }
+    }
+
     static class MapClassProperty extends ClassProperty {
         public MapClassProperty(String name) {
             type = Object.class;
@@ -540,6 +625,116 @@ public final class FastBeanCopier {
         }
     }
 
+
+    static boolean isRecordType(Class<?> type) {
+        try {
+            Method method = Class.class.getMethod("isRecord");
+            return Boolean.TRUE.equals(method.invoke(type));
+        } catch (Throwable ignore) {
+            return false;
+        }
+    }
+
+    static Object[] getRecordComponents(Class<?> type) {
+        try {
+            Method method = Class.class.getMethod("getRecordComponents");
+            Object components = method.invoke(type);
+            return components == null ? new Object[0] : (Object[]) components;
+        } catch (Throwable e) {
+            throw new UnsupportedOperationException("Unsupported record type: " + type, e);
+        }
+    }
+
+    static String getRecordComponentName(Object component) {
+        return invokeRecordComponentMethod(component, "getName", String.class);
+    }
+
+    static Class<?> getRecordComponentType(Object component) {
+        return invokeRecordComponentMethod(component, "getType", Class.class);
+    }
+
+    static Method getRecordComponentAccessor(Object component) {
+        return invokeRecordComponentMethod(component, "getAccessor", Method.class);
+    }
+
+    static Type getRecordComponentGenericType(Object component) {
+        return invokeRecordComponentMethod(component, "getGenericType", Type.class);
+    }
+
+    @SneakyThrows
+    private static <T> T invokeRecordComponentMethod(Object component, String methodName, Class<T> returnType) {
+        Method method = component.getClass().getMethod(methodName);
+        return returnType.cast(method.invoke(component));
+    }
+
+    private static Object readRecordSourceValue(Object source, Map<String, ClassProperty> sourceProperties, String name) throws Exception {
+        if (source instanceof Map) {
+            return ((Map<?, ?>) source).get(name);
+        }
+        ClassProperty property = sourceProperties.get(name);
+        if (property == null) {
+            return null;
+        }
+        Method method = ReflectionUtils.findMethod(property.getBeanType(), property.getReadMethodName());
+        if (method == null) {
+            return null;
+        }
+        ReflectionUtils.makeAccessible(method);
+        return method.invoke(source);
+    }
+
+    private static Class<?>[] resolveRecordGenericTypes(Object component) {
+        Class<?>[] genericTypes = Arrays.stream(ResolvableType.forType(getRecordComponentGenericType(component)).getGenerics())
+                                        .map(ResolvableType::getRawClass)
+                                        .filter(Objects::nonNull)
+                                        .toArray(Class[]::new);
+        return genericTypes.length == 0 ? EMPTY_CLASS_ARRAY : genericTypes;
+    }
+
+    private static boolean isDirectAssignable(Class<?> targetType, Object value) {
+        if (value == null) {
+            return false;
+        }
+        if (targetType.isInstance(value)) {
+            return true;
+        }
+        if (!targetType.isPrimitive()) {
+            return false;
+        }
+        Class<?> wrapper = wrapperClassMapping.get(targetType);
+        return wrapper != null && wrapper.isInstance(value);
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (!type.isPrimitive()) {
+            return null;
+        }
+        if (type == boolean.class) {
+            return false;
+        }
+        if (type == char.class) {
+            return (char) 0;
+        }
+        if (type == byte.class) {
+            return (byte) 0;
+        }
+        if (type == short.class) {
+            return (short) 0;
+        }
+        if (type == int.class) {
+            return 0;
+        }
+        if (type == long.class) {
+            return 0L;
+        }
+        if (type == float.class) {
+            return 0F;
+        }
+        if (type == double.class) {
+            return 0D;
+        }
+        return null;
+    }
 
     public static final class DefaultConverter implements Converter {
         private BeanFactory beanFactory = BEAN_FACTORY;
@@ -721,6 +916,9 @@ public final class FastBeanCopier {
                     return (T) copy(source, Maps.newHashMapWithExpectedSize(sourType.getFieldSize()));
                 }
 
+                if (isRecordType(targetClass)) {
+                    return copyToRecord(source, targetClass, this, Collections.emptySet());
+                }
                 return copy(source, beanFactory.newInstance(targetClass), this);
             } catch (Exception e) {
                 log.warn("复制类型{}->{}失败", targetClass, e);
