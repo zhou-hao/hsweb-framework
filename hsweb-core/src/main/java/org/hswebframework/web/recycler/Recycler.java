@@ -14,7 +14,7 @@ import java.util.function.Supplier;
  * @author zhouhao
  * @since 5.0.1
  */
-public interface Recycler<T> {
+public interface Recycler<T> extends AutoCloseable {
 
 
     /**
@@ -42,6 +42,23 @@ public interface Recycler<T> {
      */
     static <T> Recycler<T> create(Supplier<T> builder, Consumer<T> rest, int size) {
         return new RecyclerImpl<>(size, builder, rest);
+    }
+
+    /**
+     * 创建一个带销毁回调的回收器实例,请使用静态变量持有Recycler对象.
+     *
+     * <p>{@code destroy} 仅在对象无法继续被缓存复用时调用,例如队列已满、线程本地缓存被移除或重置失败。
+     * 需要释放堆外内存、文件句柄、脚本运行时等资源的对象应使用此重载。
+     *
+     * @param builder 对象构造器
+     * @param rest    对象重置器,对象准备回池前调用
+     * @param destroy 对象销毁器,对象无法继续复用时调用
+     * @param size    队列大小
+     * @param <T>     对象类型
+     * @return 回收器实例
+     */
+    static <T> Recycler<T> create(Supplier<T> builder, Consumer<T> rest, Consumer<T> destroy, int size) {
+        return new RecyclerImpl<>(size, builder, rest, destroy);
     }
 
     /**
@@ -138,5 +155,13 @@ public interface Recycler<T> {
      */
     Recyclable<T> take(boolean synchronous);
 
+    /**
+     * 关闭回收器并释放当前仍被缓存的对象。
+     *
+     * <p>已借出的对象不在此方法内强制回收；它们后续调用 {@link Recyclable#recycle()} 时会被销毁而不是重新入池。
+     */
+    @Override
+    default void close() {
+    }
 
 }

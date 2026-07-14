@@ -78,7 +78,7 @@ public class EmbedAuthenticationInfo {
         user.setUsername(username);
         user.setUserType(type);
         authentication.setUser(user);
-        authentication.getDimensions().addAll(roles);
+        authentication.addDimensions(roles);
         List<Permission> permissionList = new ArrayList<>();
 
         permissionList.addAll(permissions.stream()

@@ -1,5 +1,6 @@
 package org.hswebframework.web.authorization.simple;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.*;
 import org.apache.commons.collections4.CollectionUtils;
 import org.hswebframework.web.authorization.Permission;
@@ -28,6 +29,7 @@ public class SimplePermission implements Permission {
 
     private Set<String> actions;
 
+    @JsonIgnore
     private Set<DataAccessConfig> dataAccesses;
 
     private Map<String, Object> options;

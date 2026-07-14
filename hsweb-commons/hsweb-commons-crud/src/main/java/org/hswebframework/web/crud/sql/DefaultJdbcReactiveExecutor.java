@@ -72,7 +72,7 @@ public class DefaultJdbcReactiveExecutor extends JdbcReactiveSqlExecutor {
     }
 
     @Override
-    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager, readOnly = true)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     public <E> Flux<E> select(String sql, ResultWrapper<E, ?> wrapper) {
         return super.select(sql, wrapper);
     }

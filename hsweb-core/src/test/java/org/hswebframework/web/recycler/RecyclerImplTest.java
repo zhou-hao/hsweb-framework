@@ -1,28 +1,29 @@
 package org.hswebframework.web.recycler;
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
+import org.junit.Before;
+import org.junit.Test;
 import reactor.core.scheduler.Schedulers;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.Assert.*;
 
-@DisplayName("RecyclerImpl 单元测试")
-class RecyclerImplTest {
+public class RecyclerImplTest {
 
     private AtomicInteger createCount;
     private AtomicInteger resetCount;
     private Supplier<StringBuilder> factory;
     private Consumer<StringBuilder> rest;
 
-    @BeforeEach
-    void setUp() {
+    @Before
+    public void setUp() {
         createCount = new AtomicInteger(0);
         resetCount = new AtomicInteger(0);
         
@@ -38,8 +39,7 @@ class RecyclerImplTest {
     }
 
     @Test
-    @DisplayName("构造函数参数验证")
-    void testConstructorValidation() {
+    public void testConstructorValidation() {
         // 测试 size 参数验证
         assertThrows(IllegalArgumentException.class, 
                 () -> new RecyclerImpl<>(-1, factory, rest));
@@ -55,18 +55,20 @@ class RecyclerImplTest {
         // 测试 rest 参数验证
         assertThrows(IllegalArgumentException.class, 
                 () -> new RecyclerImpl<>(2, factory, null));
+
+        // 测试 destroy 参数验证
+        assertThrows(IllegalArgumentException.class,
+                () -> new RecyclerImpl<>(2, factory, rest, null));
     }
 
     @Test
-    @DisplayName("正常构造函数")
-    void testValidConstructor() {
-        assertDoesNotThrow(() -> new RecyclerImpl<>(2, factory, rest));
-        assertDoesNotThrow(() -> new RecyclerImpl<>(10, factory, rest));
+    public void testValidConstructor() {
+        new RecyclerImpl<>(2, factory, rest);
+        new RecyclerImpl<>(10, factory, rest);
     }
 
     @Test
-    @DisplayName("测试 doWith(Function) 方法")
-    void testDoWithFunction() {
+    public void testDoWithFunction() {
         RecyclerImpl<StringBuilder> recycler = new RecyclerImpl<>(2, factory, rest);
         
         // 第一次调用，应该创建新对象
@@ -92,8 +94,7 @@ class RecyclerImplTest {
     }
 
     @Test
-    @DisplayName("测试 doWith(BiFunction) 方法")
-    void testDoWithBiFunction() {
+    public void testDoWithBiFunction() {
         RecyclerImpl<StringBuilder> recycler = new RecyclerImpl<>(2, factory, rest);
         
         // 第一次调用，应该创建新对象
@@ -119,8 +120,7 @@ class RecyclerImplTest {
     }
 
     @Test
-    @DisplayName("测试队列大小限制")
-    void testQueueSizeLimit() {
+    public void testQueueSizeLimit() {
         RecyclerImpl<StringBuilder> recycler = new RecyclerImpl<>(2, factory, rest);
         
         // 在非阻塞线程环境中，测试 ThreadLocal 的行为
@@ -161,8 +161,7 @@ class RecyclerImplTest {
     }
 
     @Test
-    @DisplayName("测试异常情况下的资源清理")
-    void testExceptionHandling() {
+    public void testExceptionHandling() {
         RecyclerImpl<StringBuilder> recycler = new RecyclerImpl<>(2, factory, rest);
         
         // 测试在执行过程中抛出异常
@@ -188,8 +187,7 @@ class RecyclerImplTest {
     }
 
     @Test
-    @DisplayName("测试并发安全性")
-    void testConcurrency() throws InterruptedException {
+    public void testConcurrency() throws InterruptedException {
         RecyclerImpl<StringBuilder> recycler = new RecyclerImpl<>(10, factory, rest);
         
         Thread[] threads = new Thread[5];
@@ -226,8 +224,7 @@ class RecyclerImplTest {
     }
 
     @Test
-    @DisplayName("测试 Recycler 静态工厂方法")
-    void testStaticFactory() {
+    public void testStaticFactory() {
         Recycler<StringBuilder> recycler = Recycler.create(factory, rest, 2);
         
         String result = recycler.doWith(sb -> {
@@ -241,8 +238,141 @@ class RecyclerImplTest {
     }
 
     @Test
-    @DisplayName("测试 ThreadLocal 重用逻辑")
-    void testThreadLocalReuse() {
+    public void testStaticFactoryKeepsThreadLocalReuseForPlainObjects() throws InterruptedException {
+        Recycler<StringBuilder> recycler = Recycler.create(factory, rest, 2);
+        AtomicReference<Integer> createdCount = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+
+        Schedulers
+            .parallel()
+            .schedule(() -> {
+                try {
+                    recycler.doWith(sb -> {
+                        sb.append("first");
+                        return sb.toString();
+                    });
+                    recycler.doWith(sb -> {
+                        sb.append("second");
+                        return sb.toString();
+                    });
+                    createdCount.set(createCount.get());
+                } finally {
+                    latch.countDown();
+                }
+            });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+
+        assertEquals(Integer.valueOf(1), createdCount.get());
+    }
+
+    @Test
+    public void testDestroyFactoryDoesNotUseThreadLocalForManagedResources() throws InterruptedException {
+        Recycler<TestResource> recycler = Recycler.create(
+            TestResource::new,
+            TestResource::reset,
+            TestResource::destroy,
+            2
+        );
+        AtomicReference<TestResource> first = new AtomicReference<>();
+        AtomicReference<TestResource> second = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+
+        Schedulers
+            .parallel()
+            .schedule(() -> {
+                try {
+                    recycler.doWith(resource -> {
+                        first.set(resource);
+                        return resource.toString();
+                    });
+                    recycler.doWith(resource -> {
+                        second.set(resource);
+                        return resource.toString();
+                    });
+                } finally {
+                    latch.countDown();
+                }
+            });
+
+        assertTrue(latch.await(5, TimeUnit.SECONDS));
+
+        assertSame(first.get(), second.get());
+        recycler.close();
+        assertTrue(first.get().destroyed);
+    }
+
+    @Test
+    public void testDestroyOverflowObjectWhenQueueIsFull() {
+        Recycler<TestResource> recycler = Recycler.create(
+            TestResource::new,
+            TestResource::reset,
+            TestResource::destroy,
+            2
+        );
+
+        Recyclable<TestResource> first = recycler.take(false);
+        Recyclable<TestResource> second = recycler.take(false);
+        Recyclable<TestResource> third = recycler.take(false);
+        TestResource firstResource = first.get();
+        TestResource secondResource = second.get();
+        TestResource thirdResource = third.get();
+
+        first.recycle();
+        second.recycle();
+        third.recycle();
+
+        assertFalse(firstResource.destroyed);
+        assertFalse(secondResource.destroyed);
+        assertTrue(thirdResource.destroyed);
+    }
+
+    @Test
+    public void testDestroyCachedObjectsWhenRecyclerIsClosed() {
+        Recycler<TestResource> recycler = Recycler.create(
+            TestResource::new,
+            TestResource::reset,
+            TestResource::destroy,
+            2
+        );
+
+        TestResource first;
+        TestResource second;
+        Recyclable<TestResource> firstRef = recycler.take(false);
+        Recyclable<TestResource> secondRef = recycler.take(false);
+        first = firstRef.get();
+        second = secondRef.get();
+        firstRef.recycle();
+        secondRef.recycle();
+
+        recycler.close();
+
+        assertTrue(first.destroyed);
+        assertTrue(second.destroyed);
+        assertThrows(IllegalStateException.class, () -> recycler.take(false));
+    }
+
+    @Test
+    public void testDestroyBorrowedObjectWhenRecycledAfterClose() {
+        Recycler<TestResource> recycler = Recycler.create(
+            TestResource::new,
+            TestResource::reset,
+            TestResource::destroy,
+            2
+        );
+
+        Recyclable<TestResource> ref = recycler.take(false);
+        TestResource resource = ref.get();
+
+        recycler.close();
+        ref.recycle();
+
+        assertTrue(resource.destroyed);
+        assertThrows(IllegalStateException.class, () -> recycler.doWith(TestResource::toString));
+    }
+
+    @Test
+    public void testThreadLocalReuse() {
         RecyclerImpl<StringBuilder> recycler = new RecyclerImpl<>(2, factory, rest);
         
         // 第一次调用
@@ -265,4 +395,15 @@ class RecyclerImplTest {
         // 验证对象被重用
         assertTrue(resetCount.get() > initialResetCount);
     }
-} 
+
+    private static class TestResource {
+        private boolean destroyed;
+
+        void reset() {
+        }
+
+        void destroy() {
+            destroyed = true;
+        }
+    }
+}

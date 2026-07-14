@@ -55,7 +55,7 @@ public class SimpleAuthenticationBuilder implements AuthenticationBuilder {
 
     @Override
     public AuthenticationBuilder role(List<Role> role) {
-        authentication.getDimensions().addAll(role);
+        authentication.addDimensions(role);
         return this;
     }
 
@@ -67,7 +67,7 @@ public class SimpleAuthenticationBuilder implements AuthenticationBuilder {
 
     @Override
     public AuthenticationBuilder permission(List<Permission> permission) {
-        authentication.setPermissions(permission);
+        authentication.addPermissions(permission);
         return this;
     }
 
@@ -95,7 +95,7 @@ public class SimpleAuthenticationBuilder implements AuthenticationBuilder {
             }
             permissions.add(permission);
         }
-        authentication.setPermissions(permissions);
+        authentication.addPermissions(permissions);
         return this;
     }
 
@@ -106,13 +106,13 @@ public class SimpleAuthenticationBuilder implements AuthenticationBuilder {
 
     @Override
     public AuthenticationBuilder attributes(String attributes) {
-        authentication.getAttributes().putAll(JSON.<Map<String, Serializable>>parseObject(attributes, Map.class));
+        authentication.putAttributes(JSON.<Map<String, Serializable>>parseObject(attributes, Map.class));
         return this;
     }
 
     @Override
     public AuthenticationBuilder attributes(Map<String, Serializable> permission) {
-        authentication.getAttributes().putAll(permission);
+        authentication.putAttributes(permission);
         return this;
     }
 
@@ -137,7 +137,7 @@ public class SimpleAuthenticationBuilder implements AuthenticationBuilder {
                 options
             ));
         }
-        authentication.setDimensions(dimensions);
+        authentication.addDimensions(dimensions);
 
         return this;
 

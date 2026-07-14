@@ -102,13 +102,13 @@ public interface ReactiveCrudService<E, K> {
                 .findById(publisher);
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Mono<E> findById(Mono<K> publisher) {
         return getRepository()
                 .findById(publisher);
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> findById(Flux<K> publisher) {
         return getRepository()
                 .findById(publisher);
@@ -175,13 +175,13 @@ public interface ReactiveCrudService<E, K> {
     }
 
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> query(Mono<? extends QueryParamEntity> queryParamMono) {
         return queryParamMono
                 .flatMapMany(this::query);
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> query(QueryParamEntity param) {
         return getRepository()
                 .createQuery()
@@ -189,12 +189,12 @@ public interface ReactiveCrudService<E, K> {
                 .fetch();
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Mono<PagerResult<E>> queryPager(QueryParamEntity queryParamMono) {
         return queryPager(queryParamMono, Function.identity());
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default <T> Mono<PagerResult<T>> queryPager(QueryParamEntity query, Function<E, T> mapper) {
         //如果查询参数指定了总数,表示不需要再进行count操作.
         //建议前端在使用分页查询时,切换下一页时,将第一次查询到total结果传入查询参数,可以提升查询性能.
@@ -233,19 +233,19 @@ public interface ReactiveCrudService<E, K> {
                 });
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default <T> Mono<PagerResult<T>> queryPager(Mono<? extends QueryParamEntity> queryParamMono, Function<E, T> mapper) {
         return queryParamMono
                 .cast(QueryParamEntity.class)
                 .flatMap(param -> queryPager(param, mapper));
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Mono<PagerResult<E>> queryPager(Mono<? extends QueryParamEntity> queryParamMono) {
         return queryPager(queryParamMono, Function.identity());
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Mono<Integer> count(QueryParamEntity queryParam) {
         return getRepository()
                 .createQuery()
@@ -253,7 +253,7 @@ public interface ReactiveCrudService<E, K> {
                 .count();
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Mono<Integer> count(Mono<? extends QueryParamEntity> queryParamMono) {
         return queryParamMono.flatMap(this::count);
     }

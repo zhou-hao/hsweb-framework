@@ -397,6 +397,7 @@ final class FastBeanCopierConverterSupport implements Converter {
         private final boolean arrayType;
         private final boolean numberType;
         private final boolean mapInterfaceType;
+        private final boolean recordType;
         private final boolean beanLikeTarget;
 
         private ConversionPlan(Class<?> targetClass, Class<?>[] genericTypes) {
@@ -413,6 +414,7 @@ final class FastBeanCopierConverterSupport implements Converter {
             this.arrayType = target.isArrayType();
             this.numberType = target.isNumber();
             this.mapInterfaceType = targetClass == Map.class;
+            this.recordType = targetClass.isRecord();
             this.beanLikeTarget = isBeanLikeTarget(target, targetClass);
             this.apacheConverter = lookupApacheConverter(targetClass);
             this.collectionFactory = collectionType ? getCollectionFactory(targetClass) : null;
@@ -501,6 +503,9 @@ final class FastBeanCopierConverterSupport implements Converter {
                 if (source instanceof Date) {
                     source = ((Date) source).getTime();
                 }
+            }
+            if (recordType) {
+                return FastBeanCopierSupport.copyToRecord(source, targetClass, support, Collections.emptySet());
             }
             if (beanLikeTarget && source instanceof Map) {
                 return FastBeanCopierSupport.copy(source, support.beanFactory.newInstance(targetClass), support);

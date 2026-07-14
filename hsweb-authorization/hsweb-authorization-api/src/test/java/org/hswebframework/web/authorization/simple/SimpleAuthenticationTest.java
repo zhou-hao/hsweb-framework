@@ -550,6 +550,87 @@ class SimpleAuthenticationTest {
         assertTrue(userDimension.isPresent());
     }
 
+    @Test
+    void testSetDimensionsDeduplicatesUser() {
+        authentication.setUser(user);
+        // setDimensions 再次带入 user(及角色)时,user 维度不应被重复添加
+        authentication.setDimensions(Arrays.asList(user, dimension2));
+
+        long userCount = authentication
+            .getDimensions()
+            .stream()
+            .filter(d -> d.getId().equals(user.getId())
+                && d.getType().getId().equals(DefaultDimensionType.user.getId()))
+            .count();
+        assertEquals(1, userCount, "user 维度不应被重复添加");
+        assertEquals(2, authentication.getDimensions().size());
+    }
+
+    @Test
+    void testAddDimensionReplacesExisting() {
+        authentication.addDimension(SimpleDimension.of("org-1", "OLD", SimpleDimensionType.of("org"), null));
+        // 相同 (type,id) 再次 add => 替换为最新(last-wins),不重复
+        authentication.addDimension(SimpleDimension.of("org-1", "NEW", SimpleDimensionType.of("org"), null));
+
+        assertEquals(1, authentication.getDimensions().size());
+        assertEquals("NEW", authentication.getDimension("org", "org-1").get().getName());
+    }
+
+    @Test
+    void testSetDimensionsLastWins() {
+        // 列表内相同 (type,id),后者覆盖前者
+        authentication.setDimensions(Arrays.asList(
+            SimpleDimension.of("org-1", "OLD", SimpleDimensionType.of("org"), null),
+            SimpleDimension.of("org-1", "NEW", SimpleDimensionType.of("org"), null)));
+
+        assertEquals(1, authentication.getDimensions().size());
+        assertEquals("NEW", authentication.getDimension("org", "org-1").get().getName());
+    }
+
+    @Test
+    void testMergeKeepsSelfOnDuplicate() {
+        // merge 保持 self 优先: 相同 (type,id) 时 self 的值不被 other 覆盖
+        authentication.setDimensions(Collections.singletonList(
+            SimpleDimension.of("org-1", "SELF", SimpleDimensionType.of("org"), null)));
+        SimpleAuthentication other = new SimpleAuthentication();
+        other.setDimensions(Collections.singletonList(
+            SimpleDimension.of("org-1", "OTHER", SimpleDimensionType.of("org"), null)));
+
+        authentication.merge(other);
+
+        assertEquals(1, authentication.getDimensions().size());
+        assertEquals("SELF", authentication.getDimension("org", "org-1").get().getName());
+    }
+
+    @Test
+    void testAddDimensionsDeduplicates() {
+        authentication.addDimension(dimension1);
+        authentication.addDimensions(Arrays.asList(dimension1, dimension2));
+
+        assertEquals(2, authentication.getDimensions().size());
+        assertTrue(authentication.hasDimension("org", "org-1"));
+        assertTrue(authentication.hasDimension("role", "role-1"));
+    }
+
+    @Test
+    void testMergeInvalidatesFastPathCache() {
+        authentication.setUser(user);
+        authentication.setDimensions(Collections.singletonList(dimension1));
+
+        // 触发 fastPath 缓存构建(第8次访问)
+        for (int i = 0; i < 8; i++) {
+            authentication.getDimension("org", "org-1");
+        }
+
+        SimpleAuthentication other = new SimpleAuthentication();
+        other.setDimensions(Collections.singletonList(dimension2));
+        authentication.merge(other);
+
+        // merge 重建了 dimensions/permissions 列表,缓存须失效,新维度应可被查询到
+        assertTrue(authentication.getDimension("role", "role-1").isPresent(),
+                   "merge 后新维度应可查询(fastPath 缓存已失效)");
+    }
+
     // ========== 性能测试 ==========
 
     @Test

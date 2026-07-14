@@ -9,6 +9,7 @@ import org.springframework.util.ReflectionUtils;
 
 import java.beans.PropertyDescriptor;
 import java.lang.reflect.Field;
+import java.lang.reflect.RecordComponent;
 import java.util.*;
 import java.util.function.BiFunction;
 import java.util.function.Function;
@@ -104,6 +105,10 @@ final class FastBeanCopierPropertySupport {
     }
 
     static Map<String, ClassProperty> createProperty(Class<?> type) {
+        if (type.isRecord()) {
+            return createRecordProperty(type);
+        }
+
         List<String> fieldNames = Arrays
             .stream(type.getDeclaredFields())
             .map(Field::getName)
@@ -115,6 +120,15 @@ final class FastBeanCopierPropertySupport {
                 && property.getWriteMethod() != null)
             .map(BeanClassProperty::new)
             .sorted(Comparator.comparing(property -> fieldNames.indexOf(property.name)))
+            .collect(Collectors.toMap(ClassProperty::getName,
+                                      Function.identity(),
+                                      (k1, k2) -> k1,
+                                      LinkedHashMap::new));
+    }
+
+    static Map<String, ClassProperty> createRecordProperty(Class<?> type) {
+        return Arrays.stream(type.getRecordComponents())
+            .map(RecordClassProperty::new)
             .collect(Collectors.toMap(ClassProperty::getName,
                                       Function.identity(),
                                       (k1, k2) -> k1,
@@ -212,9 +226,9 @@ final class FastBeanCopierPropertySupport {
                 Field field = ReflectionUtils.findField(targetBeanType, name);
                 boolean hasGeneric = false;
                 if (field != null) {
-                    String[] arr = Arrays.stream(ResolvableType.forField(field)
+                    String[] arr = Arrays.stream(ResolvableType.forField(field, targetBeanType)
                             .getGenerics())
-                        .map(ResolvableType::getRawClass)
+                        .map(ResolvableType::resolve)
                         .filter(Objects::nonNull)
                         .map(t -> t.getName().concat(".class"))
                         .toArray(String[]::new);
@@ -309,6 +323,20 @@ final class FastBeanCopierPropertySupport {
             setter = createSetterFunction(paramGetter -> writeMethodName + "(" + paramGetter + ")");
             name = descriptor.getName();
             beanType = descriptor.getReadMethod().getDeclaringClass();
+        }
+    }
+
+    static class RecordClassProperty extends ClassProperty {
+        RecordClassProperty(RecordComponent component) {
+            type = component.getType();
+            readMethodName = component.getAccessor().getName();
+            writeMethodName = null;
+            getter = createGetterFunction();
+            setter = createSetterFunction(paramGetter -> {
+                throw new UnsupportedOperationException("Record property is read-only: " + component.getName());
+            });
+            name = component.getName();
+            beanType = component.getDeclaringRecord();
         }
     }
 

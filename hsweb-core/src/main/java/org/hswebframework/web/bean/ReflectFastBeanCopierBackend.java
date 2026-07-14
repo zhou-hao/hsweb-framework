@@ -191,6 +191,10 @@ final class ReflectFastBeanCopierBackend implements FastBeanCopierBackend {
             if (targetType == Object.class) {
                 return value;
             }
+            if ((Map.class.isAssignableFrom(targetType) || Collection.class.isAssignableFrom(targetType))
+                && genericTypes.length > 0) {
+                return converter.convert(value, (Class) targetType, genericTypes);
+            }
             if (isDirectAssignable(targetType, value)) {
                 return value;
             }
@@ -286,8 +290,8 @@ final class ReflectFastBeanCopierBackend implements FastBeanCopierBackend {
             if (field == null) {
                 return FastBeanCopierSupport.EMPTY_CLASS_ARRAY;
             }
-            Class<?>[] arr = Arrays.stream(ResolvableType.forField(field).getGenerics())
-                .map(ResolvableType::getRawClass)
+            Class<?>[] arr = Arrays.stream(ResolvableType.forField(field, target).getGenerics())
+                .map(ResolvableType::resolve)
                 .filter(Objects::nonNull)
                 .toArray(Class[]::new);
             return arr.length == 0 ? FastBeanCopierSupport.EMPTY_CLASS_ARRAY : arr;

@@ -1,6 +1,5 @@
 package org.hswebframework.web.crud.sql;
 
-import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.ezorm.rdb.executor.SqlRequest;
 import org.hswebframework.ezorm.rdb.executor.jdbc.JdbcSyncSqlExecutor;
@@ -8,10 +7,7 @@ import org.hswebframework.ezorm.rdb.executor.wrapper.ResultWrapper;
 import org.hswebframework.web.api.crud.entity.TransactionManagers;
 import org.hswebframework.web.datasource.DataSourceHolder;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.support.PersistenceExceptionTranslator;
 import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator;
-import org.springframework.jdbc.support.SQLExceptionTranslator;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -87,7 +83,7 @@ public class DefaultJdbcExecutor extends JdbcSyncSqlExecutor {
     }
 
     @Override
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     public <T, R> R select(SqlRequest request, ResultWrapper<T, R> wrapper) {
         return super.select(request, wrapper);
     }

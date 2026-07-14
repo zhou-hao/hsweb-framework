@@ -27,7 +27,7 @@ import java.util.stream.Stream;
 public interface TreeSortEntityService<E extends TreeSortSupportEntity<K>, K>
     extends CrudService<E, K> {
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     default List<E> queryResultToTree(QueryParamEntity paramEntity) {
         return TreeSupportEntity
             .list2tree(query(paramEntity),
@@ -35,7 +35,7 @@ public interface TreeSortEntityService<E extends TreeSortSupportEntity<K>, K>
                        this::createRootNodePredicate);
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     default List<E> queryIncludeChildrenTree(QueryParamEntity paramEntity) {
 
         return TreeSupportEntity
@@ -44,7 +44,7 @@ public interface TreeSortEntityService<E extends TreeSortSupportEntity<K>, K>
                        this::createRootNodePredicate);
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     default List<E> queryIncludeChildren(Collection<K> idList) {
         return findById(idList)
             .stream()
@@ -56,7 +56,7 @@ public interface TreeSortEntityService<E extends TreeSortSupportEntity<K>, K>
             .collect(Collectors.toList());
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     default List<E> queryIncludeChildren(QueryParamEntity queryParam) {
         return query(queryParam)
             .stream()

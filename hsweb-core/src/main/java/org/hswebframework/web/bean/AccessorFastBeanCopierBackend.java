@@ -263,7 +263,7 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
                                                              targetType,
                                                              genericTypes,
                                                              isNumberType(targetType),
-                                                             true);
+                                                             false);
                 }
                 return new MapConvertingPropertyTransfer(sourceProperty.getName(),
                                                          writer,
@@ -370,8 +370,8 @@ abstract class AccessorFastBeanCopierBackend implements FastBeanCopierBackend {
                 if (field == null) {
                     return FastBeanCopierSupport.EMPTY_CLASS_ARRAY;
                 }
-                Class<?>[] arr = Arrays.stream(ResolvableType.forField(field).getGenerics())
-                    .map(ResolvableType::getRawClass)
+                Class<?>[] arr = Arrays.stream(ResolvableType.forField(field, target).getGenerics())
+                    .map(ResolvableType::resolve)
                     .filter(Objects::nonNull)
                     .toArray(Class[]::new);
                 return arr.length == 0 ? FastBeanCopierSupport.EMPTY_CLASS_ARRAY : arr;

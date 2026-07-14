@@ -467,6 +467,44 @@ public void testBackendSelectorSupportsExplicitOverride() {
         }
     }
 
+    @Test
+    public void testRecordCopyPerformance() {
+        Map<String, Object> mapSource = createRecordBenchmarkMap();
+        RecordSource recordSource = new RecordSource("record-source",
+                                                     28,
+                                                     Color.BLUE,
+                                                     new FastBeanCopierTest.NestedRecord("nested-source"),
+                                                     Arrays.asList(new FastBeanCopierTest.NestedRecord("nested-list")));
+        int warmup = 3_000;
+        int iterations = 20_000;
+
+        FastBeanCopierSupport.clearCache();
+        for (int i = 0; i < warmup; i++) {
+            assertRecordCopied(FastBeanCopier.copy(mapSource, FastBeanCopierTest.TargetRecord.class));
+            FastBeanCopierTest.TargetRecord recordTarget =
+                FastBeanCopier.copy(recordSource, FastBeanCopierTest.TargetRecord.class);
+            Assert.assertEquals("record-source", recordTarget.name());
+        }
+
+        long mapToRecord = runRecordCopyBenchmark(mapSource, iterations);
+        long recordToRecord = runRecordCopyBenchmark(recordSource, iterations);
+        FastBeanCopierTest.TargetRecord target = FastBeanCopier.copy(mapSource, FastBeanCopierTest.TargetRecord.class);
+        assertRecordCopied(target);
+
+        System.out.println("\n=== FastBeanCopier record 性能 ===");
+        System.out.println("预热次数: " + warmup + ", 正式迭代: " + iterations);
+        System.out.println(String.format(Locale.ROOT,
+                                         "map->record    total=%8.2fms avg=%8.2fns/op",
+                                         mapToRecord / 1_000_000.0,
+                                         (double) mapToRecord / iterations));
+        System.out.println(String.format(Locale.ROOT,
+                                         "record->record total=%8.2fms avg=%8.2fns/op",
+                                         recordToRecord / 1_000_000.0,
+                                         (double) recordToRecord / iterations));
+        Assert.assertTrue(mapToRecord > 0);
+        Assert.assertTrue(recordToRecord > 0);
+    }
+
     private long runCachedCopierBenchmark(Source source, Copier copier, int iterations) {
         long start = System.nanoTime();
         for (int i = 0; i < iterations; i++) {
@@ -497,6 +535,35 @@ public void testBackendSelectorSupportsExplicitOverride() {
             FastBeanCopierSupport.copy(source, targetSupplier.get());
         }
         return System.nanoTime() - start;
+    }
+
+    private long runRecordCopyBenchmark(Object source, int iterations) {
+        long start = System.nanoTime();
+        for (int i = 0; i < iterations; i++) {
+            FastBeanCopier.copy(source, FastBeanCopierTest.TargetRecord.class);
+        }
+        return System.nanoTime() - start;
+    }
+
+    private Map<String, Object> createRecordBenchmarkMap() {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("name", "record-target");
+        map.put("age", "18");
+        map.put("color2", "RED");
+        map.put("nested", Collections.singletonMap("name", "nested-map"));
+        map.put("nestedList", Collections.singletonList(Collections.singletonMap("name", "nested-list")));
+        return map;
+    }
+
+    private void assertRecordCopied(FastBeanCopierTest.TargetRecord target) {
+        Assert.assertEquals("record-target", target.name());
+        Assert.assertEquals(18, target.age());
+        Assert.assertEquals(Color.RED, target.color2());
+        Assert.assertNotNull(target.nested());
+        Assert.assertEquals("nested-map", target.nested().name());
+        Assert.assertNotNull(target.nestedList());
+        Assert.assertEquals(1, target.nestedList().size());
+        Assert.assertEquals("nested-list", target.nestedList().get(0).name());
     }
 
     private long runBackendColdBenchmark(Source source, FastBeanCopierBackend backend) {
@@ -1120,5 +1187,12 @@ public void testBackendSelectorSupportsExplicitOverride() {
             this.targetSupplier = targetSupplier;
             this.resultChecker = resultChecker;
         }
+    }
+
+    public record RecordSource(String name,
+                               int age,
+                               Color color2,
+                               FastBeanCopierTest.NestedRecord nested,
+                               List<FastBeanCopierTest.NestedRecord> nestedList) {
     }
 }

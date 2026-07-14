@@ -34,14 +34,14 @@ public interface CrudService<E, K> {
         return getRepository().createDelete();
     }
 
-    @Transactional( readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     @SneakyThrows
     default Optional<E> findById(K id) {
         return getRepository()
                 .findById(id);
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     @SneakyThrows
     default List<E> findById(Collection<K> id) {
         if (CollectionUtils.isEmpty(id)) {
@@ -103,13 +103,13 @@ public interface CrudService<E, K> {
         return deleteById(Collections.singletonList(idArr));
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     @SneakyThrows
     default List<E> query(QueryParamEntity queryParam) {
         return createQuery().setParam(queryParam).fetch();
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     @SneakyThrows
     default PagerResult<E> queryPager(QueryParamEntity param) {
 
@@ -122,7 +122,7 @@ public interface CrudService<E, K> {
         return PagerResult.of(count, query(param), param);
     }
 
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.jdbcTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.jdbcTransactionManager)
     @SneakyThrows
     default int count(QueryParam param) {
         return getRepository()

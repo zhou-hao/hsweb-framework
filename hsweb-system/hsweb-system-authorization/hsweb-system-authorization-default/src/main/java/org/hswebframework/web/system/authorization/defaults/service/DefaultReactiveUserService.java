@@ -142,13 +142,13 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     }
 
     @Override
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     public Mono<UserEntity> findById(String id) {
         return getRepository().findById(Mono.just(id));
     }
 
     @Override
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     public Mono<UserEntity> findByUsername(String username) {
         return Mono.justOrEmpty(username)
                    .flatMap(_name -> repository
@@ -158,7 +158,7 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     }
 
     @Override
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     public Mono<UserEntity> findByUsernameAndPassword(String username, String plainPassword) {
         return Mono.justOrEmpty(username)
                    .flatMap(_name -> repository
@@ -218,7 +218,7 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     }
 
     @Override
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     public Flux<UserEntity> findUser(QueryParam queryParam) {
         return repository
             .createQuery()
@@ -227,7 +227,7 @@ public class DefaultReactiveUserService extends GenericReactiveCrudService<UserE
     }
 
     @Override
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     public Mono<Integer> countUser(QueryParam queryParam) {
         return repository
             .createQuery()

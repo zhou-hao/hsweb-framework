@@ -51,7 +51,7 @@ public interface ReactiveTreeSortEntityService<E extends TreeSortSupportEntity<K
      * @param paramEntity 查询参数
      * @return 树形结构
      */
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Mono<List<E>> queryResultToTree(QueryParamEntity paramEntity) {
         return query(paramEntity)
             .collectList()
@@ -66,7 +66,7 @@ public interface ReactiveTreeSortEntityService<E extends TreeSortSupportEntity<K
      * @param paramEntity 查询参数
      * @return 树形结构
      */
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Mono<List<E>> queryIncludeChildrenTree(QueryParamEntity paramEntity) {
         return queryIncludeChildren(paramEntity)
             .collectList()
@@ -81,7 +81,7 @@ public interface ReactiveTreeSortEntityService<E extends TreeSortSupportEntity<K
      * @param idList ID集合
      * @return 包含子节点的所有节点
      */
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> queryIncludeChildren(Collection<K> idList) {
         return queryIncludeChildren(findById(idList));
     }
@@ -93,7 +93,7 @@ public interface ReactiveTreeSortEntityService<E extends TreeSortSupportEntity<K
      * @return 包含子节点的所有节点
      * @since 4.0.18
      */
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> queryIncludeChildren(Flux<E> entities) {
         Set<String> duplicateCheck = new HashSet<>();
         return entities
@@ -114,7 +114,7 @@ public interface ReactiveTreeSortEntityService<E extends TreeSortSupportEntity<K
      * @param idList ID集合
      * @return 包含父节点的所有节点
      */
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> queryIncludeParent(Collection<K> idList) {
         return queryIncludeParent(findById(idList));
     }
@@ -126,7 +126,7 @@ public interface ReactiveTreeSortEntityService<E extends TreeSortSupportEntity<K
      * @return 包含父节点的所有节点
      * @since 4.0.18
      */
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> queryIncludeParent(Flux<E> entities) {
         Set<String> duplicateCheck = new HashSet<>();
 
@@ -149,7 +149,7 @@ public interface ReactiveTreeSortEntityService<E extends TreeSortSupportEntity<K
      * @param queryParam 查询参数
      * @return 树形结构
      */
-    @Transactional(readOnly = true, transactionManager = TransactionManagers.reactiveTransactionManager)
+    @Transactional(transactionManager = TransactionManagers.reactiveTransactionManager)
     default Flux<E> queryIncludeChildren(QueryParamEntity queryParam) {
         Set<String> duplicateCheck = new HashSet<>();
 

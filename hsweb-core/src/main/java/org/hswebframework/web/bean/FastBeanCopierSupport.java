@@ -18,6 +18,7 @@ import java.util.function.Supplier;
  */
 public final class FastBeanCopierSupport {
     private static final Map<CacheKey, Copier> CACHE = new ConcurrentHashMap<>();
+    private static final Map<CacheKey, RecordCopier> RECORD_CACHE = new ConcurrentHashMap<>();
     private static final Map<CacheKey, FastBeanCopierBackend> BACKEND_CACHE = new ConcurrentHashMap<>();
     /**
      * 动态 classloader 也保持强缓存命中，避免弱/软引用在内存波动时触发 copier 重建。
@@ -106,6 +107,9 @@ public final class FastBeanCopierSupport {
 
     @SneakyThrows
     public static <T, S> T copy(S source, Class<T> target, String... ignore) {
+        if (target.isRecord()) {
+            return copyToRecord(source, target, DEFAULT_CONVERT, ignore);
+        }
         return copy(source, target.getDeclaredConstructor().newInstance(), DEFAULT_CONVERT, ignore);
     }
 
@@ -124,6 +128,10 @@ public final class FastBeanCopierSupport {
 
     @SuppressWarnings("all")
     public static <T, S> T copy(S source, T target, Converter converter, Set<String> ignore) {
+        if (target != null && getUserClass(target).isRecord()) {
+            // record 不可变，无法写入已存在实例；这里按组件名重新构造并返回新实例。
+            return (T) copyToRecord(source, (Class) getUserClass(target), converter, ignore);
+        }
         if (source instanceof Map && target instanceof Map) {
             if (CollectionUtils.isEmpty(ignore)) {
                 ((Map) target).putAll(((Map) source));
@@ -141,6 +149,24 @@ public final class FastBeanCopierSupport {
         getCopier(source, target, true)
             .copy(source, target, ignore, converter);
         return target;
+    }
+
+    static <T, S> T copyToRecord(S source, Class<T> target, Converter converter, String... ignore) {
+        Set<String> ignored = (ignore == null || ignore.length == 0)
+            ? Collections.emptySet()
+            : new HashSet<>(Arrays.asList(ignore));
+        return copyToRecord(source, target, converter, ignored);
+    }
+
+    @SuppressWarnings("unchecked")
+    static <T, S> T copyToRecord(S source, Class<T> target, Converter converter, Set<String> ignore) {
+        return (T) getRecordCopier(getUserClass(source), target)
+            .copy(source, ignore == null ? Collections.emptySet() : ignore, converter);
+    }
+
+    private static RecordCopier getRecordCopier(Class<?> source, Class<?> target) {
+        CacheKey key = createCacheKey(source, target);
+        return RECORD_CACHE.computeIfAbsent(key, k -> RecordBeanCopierSupport.createRecordCopier(k.sourceType, k.targetType));
     }
 
     static Class<?> getUserClass(Object object) {
@@ -215,6 +241,7 @@ public final class FastBeanCopierSupport {
 
     static void clearCache() {
         CACHE.clear();
+        RECORD_CACHE.clear();
         BACKEND_CACHE.clear();
         VOLATILE_CACHE.clear();
         AccessorFastBeanCopierBackend.clearCache();
@@ -228,6 +255,7 @@ public final class FastBeanCopierSupport {
             return;
         }
         removeCacheEntries(CACHE, loader);
+        removeCacheEntries(RECORD_CACHE, loader);
         removeCacheEntries(BACKEND_CACHE, loader);
         removeVolatileCacheEntries(loader);
         AccessorFastBeanCopierBackend.clearCache(loader);

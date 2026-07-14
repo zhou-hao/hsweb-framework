@@ -87,7 +87,6 @@ public class DefaultDimensionService
     }
 
     @Override
-    @Transactional(readOnly = true)
     public Flux<DynamicDimension> getDimensionByUserId(String userId) {
         return getAllType()
             .collect(Collectors.toMap(DimensionType::getId, Function.identity()))

@@ -208,6 +208,80 @@ public class FastBeanCopierTest {
     }
 
     @Test
+    public void testRecordCopy() {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("name", "record-target");
+        values.put("age", "18");
+        values.put("color2", "RED");
+        values.put("nested", Collections.singletonMap("name", "nested-map"));
+        values.put("nestedList", Collections.singletonList(Collections.singletonMap("name", "nested-list")));
+
+        TargetRecord target = FastBeanCopier.copy(values, TargetRecord.class);
+
+        Assert.assertEquals("record-target", target.name());
+        Assert.assertEquals(18, target.age());
+        Assert.assertEquals(Color.RED, target.color2());
+        Assert.assertEquals("nested-map", target.nested().name());
+        Assert.assertEquals("nested-list", target.nestedList().get(0).name());
+
+        SourceRecord source = new SourceRecord("record-source", 20, Color.BLUE, new NestedRecord("nested-source"));
+        Target beanTarget = FastBeanCopier.copy(source, new Target());
+        Assert.assertEquals("record-source", beanTarget.getName());
+        Assert.assertEquals(20, beanTarget.getAge());
+        Assert.assertEquals(Color.BLUE, beanTarget.getColor2());
+
+        Map<String, Object> copiedMap = FastBeanCopier.copy(source, new HashMap<>());
+        Assert.assertEquals("record-source", copiedMap.get("name"));
+        Assert.assertEquals(20, copiedMap.get("age"));
+
+        TargetRecord ignored = FastBeanCopier.copy(values, TargetRecord.class, "age");
+        Assert.assertEquals(0, ignored.age());
+
+        TargetRecord ignoredNested = FastBeanCopier.copy(values, TargetRecord.class, "nested");
+        Assert.assertNull(ignoredNested.nested());
+
+        TargetRecord rebuilt = FastBeanCopier.copy(values, new TargetRecord("old", 1, Color.BLUE, null, Collections.emptyList()));
+        Assert.assertEquals("record-target", rebuilt.name());
+
+        Source beanSource = new Source();
+        beanSource.setName("bean-source");
+        beanSource.setAge(19);
+        beanSource.setColor2("蓝色");
+        BeanRecord beanRecord = FastBeanCopier.copy(beanSource, BeanRecord.class);
+        Assert.assertEquals("bean-source", beanRecord.name());
+        Assert.assertEquals(19, beanRecord.age());
+        Assert.assertEquals(Color.BLUE, beanRecord.color2());
+
+        TargetRecord recordTarget = FastBeanCopier.copy(source, TargetRecord.class);
+        Assert.assertEquals("record-source", recordTarget.name());
+        Assert.assertEquals(20, recordTarget.age());
+        Assert.assertEquals(Color.BLUE, recordTarget.color2());
+        Assert.assertEquals("nested-source", recordTarget.nested().name());
+        Assert.assertNull(recordTarget.nestedList());
+
+        Map<String, Object> partialValues = new LinkedHashMap<>();
+        partialValues.put("name", "partial-record");
+        partialValues.put("nested", new NestedRecord("direct-nested"));
+        TargetRecord partial = FastBeanCopier.copy(partialValues, TargetRecord.class);
+        Assert.assertEquals("partial-record", partial.name());
+        Assert.assertEquals(0, partial.age());
+        Assert.assertNull(partial.color2());
+        Assert.assertEquals("direct-nested", partial.nested().name());
+    }
+
+    public record SourceRecord(String name, int age, Color color2, NestedRecord nested) {
+    }
+
+    public record TargetRecord(String name, int age, Color color2, NestedRecord nested, List<NestedRecord> nestedList) {
+    }
+
+    public record BeanRecord(String name, int age, Color color2) {
+    }
+
+    public record NestedRecord(String name) {
+    }
+
+    @Test
     public void testCopyMap() {
 
 
