@@ -478,16 +478,14 @@ public void testBackendSelectorSupportsExplicitOverride() {
         int warmup = 3_000;
         int iterations = 20_000;
 
-        FastBeanCopierSupport.clearCache();
-        for (int i = 0; i < warmup; i++) {
-            assertRecordCopied(FastBeanCopier.copy(mapSource, FastBeanCopierTest.TargetRecord.class));
-            FastBeanCopierTest.TargetRecord recordTarget =
-                FastBeanCopier.copy(recordSource, FastBeanCopierTest.TargetRecord.class);
-            Assert.assertEquals("record-source", recordTarget.name());
-        }
-
+        warmupRecordCopy(mapSource, recordSource, warmup);
         long mapToRecord = runRecordCopyBenchmark(mapSource, iterations);
-        long recordToRecord = runRecordCopyBenchmark(recordSource, iterations);
+        long asmRecordToRecord = runRecordCopyBenchmark(recordSource, iterations);
+
+        long generatedRecordToRecord = runWithRecordAsmDisabled(() -> {
+            warmupRecordCopy(mapSource, recordSource, warmup);
+            return runRecordCopyBenchmark(recordSource, iterations);
+        });
         FastBeanCopierTest.TargetRecord target = FastBeanCopier.copy(mapSource, FastBeanCopierTest.TargetRecord.class);
         assertRecordCopied(target);
 
@@ -498,11 +496,43 @@ public void testBackendSelectorSupportsExplicitOverride() {
                                          mapToRecord / 1_000_000.0,
                                          (double) mapToRecord / iterations));
         System.out.println(String.format(Locale.ROOT,
-                                         "record->record total=%8.2fms avg=%8.2fns/op",
-                                         recordToRecord / 1_000_000.0,
-                                         (double) recordToRecord / iterations));
+                                         "record->record asm       total=%8.2fms avg=%8.2fns/op",
+                                         asmRecordToRecord / 1_000_000.0,
+                                         (double) asmRecordToRecord / iterations));
+        System.out.println(String.format(Locale.ROOT,
+                                         "record->record generated total=%8.2fms avg=%8.2fns/op",
+                                         generatedRecordToRecord / 1_000_000.0,
+                                         (double) generatedRecordToRecord / iterations));
+        System.out.println("record asm/generated ratio: " + formatRatio(asmRecordToRecord, generatedRecordToRecord));
         Assert.assertTrue(mapToRecord > 0);
-        Assert.assertTrue(recordToRecord > 0);
+        Assert.assertTrue(asmRecordToRecord > 0);
+        Assert.assertTrue(generatedRecordToRecord > 0);
+    }
+
+    private void warmupRecordCopy(Map<String, Object> mapSource, RecordSource recordSource, int warmup) {
+        FastBeanCopierSupport.clearCache();
+        for (int i = 0; i < warmup; i++) {
+            assertRecordCopied(FastBeanCopier.copy(mapSource, FastBeanCopierTest.TargetRecord.class));
+            FastBeanCopierTest.TargetRecord recordTarget =
+                FastBeanCopier.copy(recordSource, FastBeanCopierTest.TargetRecord.class);
+            Assert.assertEquals("record-source", recordTarget.name());
+        }
+    }
+
+    private long runWithRecordAsmDisabled(Supplier<Long> action) {
+        String previous = System.getProperty(RecordBeanCopierSupport.ASM_DISABLED_PROPERTY);
+        System.setProperty(RecordBeanCopierSupport.ASM_DISABLED_PROPERTY, "true");
+        FastBeanCopierSupport.clearCache();
+        try {
+            return action.get();
+        } finally {
+            if (previous == null) {
+                System.clearProperty(RecordBeanCopierSupport.ASM_DISABLED_PROPERTY);
+            } else {
+                System.setProperty(RecordBeanCopierSupport.ASM_DISABLED_PROPERTY, previous);
+            }
+            FastBeanCopierSupport.clearCache();
+        }
     }
 
     private long runCachedCopierBenchmark(Source source, Copier copier, int iterations) {

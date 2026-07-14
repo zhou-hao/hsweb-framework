@@ -2,10 +2,19 @@ package org.hswebframework.web.bean;
 
 import lombok.extern.slf4j.Slf4j;
 import org.hswebframework.web.proxy.Proxy;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.springframework.core.ResolvableType;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -20,7 +29,10 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 final class RecordBeanCopierSupport {
+    static final String ASM_DISABLED_PROPERTY = "hsweb.fastBeanCopier.record.asm.disabled";
+
     private static final Map<Class<?>, Class<?>> PRIMITIVE_WRAPPERS = new HashMap<>();
+    private static final AtomicInteger ASM_COUNTER = new AtomicInteger();
 
     static {
         PRIMITIVE_WRAPPERS.put(byte.class, Byte.class);
@@ -37,6 +49,12 @@ final class RecordBeanCopierSupport {
     }
 
     static RecordCopier createRecordCopier(Class<?> source, Class<?> target) {
+        if (!Boolean.getBoolean(ASM_DISABLED_PROPERTY)) {
+            RecordCopier asmCopier = tryCreateAsmRecordCopier(source, target);
+            if (asmCopier != null) {
+                return asmCopier;
+            }
+        }
         String method = "public Object copy(Object s, java.util.Set ignore, " +
             "org.hswebframework.web.bean.Converter converter){\n" +
             "try{\n\t" +
@@ -55,6 +73,189 @@ final class RecordBeanCopierSupport {
             log.error("创建record copy代理对象失败:\n{}", method, e);
             throw new UnsupportedOperationException(e.getMessage(), e);
         }
+    }
+
+    private static RecordCopier tryCreateAsmRecordCopier(Class<?> source, Class<?> target) {
+        if (!canUseAsmRecordCopier(source, target)) {
+            return null;
+        }
+        try {
+            Class<?> generatedClass = MethodHandles.lookup().defineClass(createAsmRecordCopierCode(source, target));
+            return (RecordCopier) generatedClass.getDeclaredConstructor().newInstance();
+        } catch (Throwable e) {
+            log.debug("创建ASM record copy代理对象失败:{}=>{}", source, target, e);
+            return null;
+        }
+    }
+
+    private static boolean canUseAsmRecordCopier(Class<?> source, Class<?> target) {
+        if (Map.class.isAssignableFrom(source)
+            || !target.isRecord()
+            || !isPublicVisible(source)
+            || !isPublicVisible(target)) {
+            return false;
+        }
+        Map<String, FastBeanCopierPropertySupport.ClassProperty> sourceProperties =
+            FastBeanCopierPropertySupport.createProperty(source);
+        for (RecordComponent component : target.getRecordComponents()) {
+            FastBeanCopierPropertySupport.ClassProperty sourceProperty = sourceProperties.get(component.getName());
+            if (sourceProperty == null) {
+                continue;
+            }
+            if (!isDirectCompatible(sourceProperty.getType(), component.getType())) {
+                return false;
+            }
+            Method accessor = findReadMethod(sourceProperty);
+            if (accessor == null
+                || !Modifier.isPublic(accessor.getModifiers())
+                || !isPublicVisible(accessor.getDeclaringClass())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isPublicVisible(Class<?> type) {
+        while (type.isArray()) {
+            type = type.getComponentType();
+        }
+        return type.isPrimitive() || Modifier.isPublic(type.getModifiers());
+    }
+
+    private static boolean isDirectCompatible(Class<?> sourceType, Class<?> targetType) {
+        if (sourceType == targetType) {
+            return true;
+        }
+        if (sourceType.isPrimitive()) {
+            return PRIMITIVE_WRAPPERS.get(sourceType) == targetType || targetType == Object.class;
+        }
+        if (targetType.isPrimitive()) {
+            return PRIMITIVE_WRAPPERS.get(targetType) == sourceType;
+        }
+        return targetType.isAssignableFrom(sourceType);
+    }
+
+    private static Method findReadMethod(FastBeanCopierPropertySupport.ClassProperty property) {
+        try {
+            return property.getBeanType().getMethod(property.getReadMethodName());
+        } catch (NoSuchMethodException e) {
+            return null;
+        }
+    }
+
+    private static byte[] createAsmRecordCopierCode(Class<?> source, Class<?> target) {
+        String className = "org/hswebframework/web/bean/RecordCopier$Asm" + ASM_COUNTER.incrementAndGet();
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V1_8,
+                 Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL,
+                 className,
+                 null,
+                 "java/lang/Object",
+                 new String[]{"org/hswebframework/web/bean/RecordCopier"});
+
+        MethodVisitor constructor = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        constructor.visitCode();
+        constructor.visitVarInsn(Opcodes.ALOAD, 0);
+        constructor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        constructor.visitInsn(Opcodes.RETURN);
+        constructor.visitMaxs(0, 0);
+        constructor.visitEnd();
+
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC,
+                                          "copy",
+                                          "(Ljava/lang/Object;Ljava/util/Set;Lorg/hswebframework/web/bean/Converter;)Ljava/lang/Object;",
+                                          null,
+                                          null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(source));
+        mv.visitVarInsn(Opcodes.ASTORE, 4);
+        mv.visitTypeInsn(Opcodes.NEW, Type.getInternalName(target));
+        mv.visitInsn(Opcodes.DUP);
+
+        Map<String, FastBeanCopierPropertySupport.ClassProperty> sourceProperties =
+            FastBeanCopierPropertySupport.createProperty(source);
+        StringBuilder constructorDescriptor = new StringBuilder("(");
+        for (RecordComponent component : target.getRecordComponents()) {
+            Class<?> componentType = component.getType();
+            constructorDescriptor.append(Type.getDescriptor(componentType));
+            FastBeanCopierPropertySupport.ClassProperty sourceProperty = sourceProperties.get(component.getName());
+            generateAsmRecordConstructorArgument(mv, component, sourceProperty);
+        }
+        constructorDescriptor.append(")V");
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL,
+                           Type.getInternalName(target),
+                           "<init>",
+                           constructorDescriptor.toString(),
+                           false);
+        mv.visitInsn(Opcodes.ARETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    private static void generateAsmRecordConstructorArgument(MethodVisitor mv,
+                                                            RecordComponent component,
+                                                            FastBeanCopierPropertySupport.ClassProperty sourceProperty) {
+        Class<?> targetType = component.getType();
+        Label readValue = new Label();
+        Label end = new Label();
+
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitLdcInsn(component.getName());
+        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE,
+                           "java/util/Set",
+                           "contains",
+                           "(Ljava/lang/Object;)Z",
+                           true);
+        mv.visitJumpInsn(Opcodes.IFEQ, readValue);
+        pushDefaultValue(mv, targetType);
+        mv.visitJumpInsn(Opcodes.GOTO, end);
+
+        mv.visitLabel(readValue);
+        if (sourceProperty == null) {
+            pushDefaultValue(mv, targetType);
+            mv.visitJumpInsn(Opcodes.GOTO, end);
+        } else {
+            Method accessor = Objects.requireNonNull(findReadMethod(sourceProperty));
+            Class<?> sourceType = accessor.getReturnType();
+            mv.visitVarInsn(Opcodes.ALOAD, 4);
+            mv.visitMethodInsn(accessor.getDeclaringClass().isInterface() ? Opcodes.INVOKEINTERFACE : Opcodes.INVOKEVIRTUAL,
+                               Type.getInternalName(accessor.getDeclaringClass()),
+                               accessor.getName(),
+                               Type.getMethodDescriptor(accessor),
+                               accessor.getDeclaringClass().isInterface());
+            adaptDirectValueForTarget(mv, sourceType, targetType);
+        }
+        mv.visitLabel(end);
+    }
+
+    private static void adaptDirectValueForTarget(MethodVisitor mv, Class<?> sourceType, Class<?> targetType) {
+        if (sourceType.isPrimitive()) {
+            if (targetType.isPrimitive()) {
+                return;
+            }
+            boxPrimitive(mv, sourceType);
+            if (targetType != Object.class) {
+                mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetType));
+            }
+            return;
+        }
+        Label notNull = new Label();
+        Label end = new Label();
+        mv.visitInsn(Opcodes.DUP);
+        mv.visitJumpInsn(Opcodes.IFNONNULL, notNull);
+        mv.visitInsn(Opcodes.POP);
+        pushDefaultValue(mv, targetType);
+        mv.visitJumpInsn(Opcodes.GOTO, end);
+        mv.visitLabel(notNull);
+        if (targetType.isPrimitive()) {
+            unboxPrimitive(mv, targetType);
+        } else if (targetType != Object.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(targetType));
+        }
+        mv.visitLabel(end);
     }
 
     private static String createRecordCopierCode(Class<?> source, Class<?> target) {
@@ -191,5 +392,69 @@ final class RecordBeanCopierSupport {
             ? PRIMITIVE_WRAPPERS.get(type)
             : type;
         return value + " instanceof " + getTypeName(directType);
+    }
+
+    private static void pushDefaultValue(MethodVisitor mv, Class<?> type) {
+        if (!type.isPrimitive()) {
+            mv.visitInsn(Opcodes.ACONST_NULL);
+            return;
+        }
+        if (type == long.class) {
+            mv.visitInsn(Opcodes.LCONST_0);
+        } else if (type == float.class) {
+            mv.visitInsn(Opcodes.FCONST_0);
+        } else if (type == double.class) {
+            mv.visitInsn(Opcodes.DCONST_0);
+        } else {
+            mv.visitInsn(Opcodes.ICONST_0);
+        }
+    }
+
+    private static void boxPrimitive(MethodVisitor mv, Class<?> primitiveType) {
+        if (primitiveType == boolean.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+        } else if (primitiveType == byte.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;", false);
+        } else if (primitiveType == short.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Short", "valueOf", "(S)Ljava/lang/Short;", false);
+        } else if (primitiveType == int.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+        } else if (primitiveType == long.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false);
+        } else if (primitiveType == float.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", false);
+        } else if (primitiveType == double.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false);
+        } else if (primitiveType == char.class) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", false);
+        }
+    }
+
+    private static void unboxPrimitive(MethodVisitor mv, Class<?> primitiveType) {
+        if (primitiveType == boolean.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+        } else if (primitiveType == byte.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Number");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Number", "byteValue", "()B", false);
+        } else if (primitiveType == short.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Number");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Number", "shortValue", "()S", false);
+        } else if (primitiveType == int.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Number");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Number", "intValue", "()I", false);
+        } else if (primitiveType == long.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Number");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Number", "longValue", "()J", false);
+        } else if (primitiveType == float.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Number");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Number", "floatValue", "()F", false);
+        } else if (primitiveType == double.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Number");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Number", "doubleValue", "()D", false);
+        } else if (primitiveType == char.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Character");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Character", "charValue", "()C", false);
+        }
     }
 }
