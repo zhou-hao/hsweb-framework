@@ -13,6 +13,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import jakarta.validation.constraints.NotNull;
+
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
@@ -442,7 +443,7 @@ public interface QueryHelper {
          *
          * @return 数据流
          */
-        Flux<R> fetch(int pageIndex,int pageSize);
+        Flux<R> fetch(int pageIndex, int pageSize);
 
         /**
          * 执行分页查询,默认返回第一页的25条数据.
@@ -746,17 +747,99 @@ public interface QueryHelper {
     }
 
     /**
-     * 指定ReactiveQuery和QueryParamEntity,执行查询并封装为分页查询结果.
+     * 使用指定的最大页大小执行分页查询。
+     *
+     * @param param       QueryParamEntity
+     * @param query       ReactiveQuery
+     * @param maxPageSize 当前场景允许聚合的最大页大小
+     * @param <T>         T
+     * @return PagerResult
+     */
+    static <T> Mono<PagerResult<T>> queryPager(QueryParamEntity param,
+                                               Supplier<ReactiveQuery<T>> query,
+                                               int maxPageSize) {
+
+        return queryPager(param, query, Function.identity(), PagerQueryPolicy.clamp(maxPageSize));
+    }
+
+    /**
+     * 使用指定策略执行分页查询。
      *
      * @param param  QueryParamEntity
      * @param query  ReactiveQuery
-     * @param mapper 转换结果类型
+     * @param policy 分页策略
      * @param <T>    T
      * @return PagerResult
      */
-    static <T, R> Mono<PagerResult<R>> queryPager(QueryParamEntity param,
+    static <T> Mono<PagerResult<T>> queryPager(QueryParamEntity param,
+                                               Supplier<ReactiveQuery<T>> query,
+                                               PagerQueryPolicy policy) {
+
+        return queryPager(param, query, Function.identity(), policy);
+    }
+
+    /**
+     * 指定ReactiveQuery和QueryParamEntity,执行查询并封装为分页查询结果.
+     *
+     * @param queryParam QueryParamEntity
+     * @param query      ReactiveQuery
+     * @param mapper     转换结果类型
+     * @param <T>        T
+     * @param <R>        R
+     * @return PagerResult
+     */
+    static <T, R> Mono<PagerResult<R>> queryPager(QueryParamEntity queryParam,
                                                   Supplier<ReactiveQuery<T>> query,
                                                   Function<T, R> mapper) {
+        return Mono.deferContextual(contextView -> doQueryPager(
+            queryParam,
+            query,
+            mapper,
+            PagerQueryPolicy.from(contextView)));
+    }
+
+    /**
+     * 使用指定的最大页大小执行分页查询并转换结果类型。
+     *
+     * @param queryParam  原始查询参数，不会被修改
+     * @param query       ReactiveQuery
+     * @param mapper      转换结果类型
+     * @param maxPageSize 当前场景允许聚合的最大页大小
+     * @param <T>         查询结果类型
+     * @param <R>         转换结果类型
+     * @return PagerResult
+     */
+    static <T, R> Mono<PagerResult<R>> queryPager(QueryParamEntity queryParam,
+                                                  Supplier<ReactiveQuery<T>> query,
+                                                  Function<T, R> mapper,
+                                                  int maxPageSize) {
+        return queryPager(queryParam, query, mapper, PagerQueryPolicy.clamp(maxPageSize));
+    }
+
+    /**
+     * 使用指定策略执行分页查询并转换结果类型。
+     *
+     * @param queryParam 原始查询参数，不会被修改
+     * @param query      ReactiveQuery
+     * @param mapper     转换结果类型
+     * @param policy     分页策略
+     * @param <T>        查询结果类型
+     * @param <R>        转换结果类型
+     * @return PagerResult
+     */
+    static <T, R> Mono<PagerResult<R>> queryPager(QueryParamEntity queryParam,
+                                                  Supplier<ReactiveQuery<T>> query,
+                                                  Function<T, R> mapper,
+                                                  PagerQueryPolicy policy) {
+        return Mono.defer(() -> doQueryPager(queryParam, query, mapper, policy));
+    }
+
+    private static <T, R> Mono<PagerResult<R>> doQueryPager(QueryParamEntity queryParam,
+                                                            Supplier<ReactiveQuery<T>> query,
+                                                            Function<T, R> mapper,
+                                                            PagerQueryPolicy policy) {
+        // PagerResult的数据必须聚合为List；统一规范化后再查询，真正的无分页结果由Flux接口承载。
+        QueryParamEntity param = policy.normalize(queryParam);
         //如果查询参数指定了总数,表示不需要再进行count操作.
         //建议前端在使用分页查询时,切换下一页时,将第一次查询到total结果传入查询参数,可以提升查询性能.
         if (param.getTotal() != null) {
@@ -764,6 +847,7 @@ public interface QueryHelper {
                 .get()
                 .setParam(param.rePaging(param.getTotal()))
                 .fetch()
+                .take(param.getPageSize())
                 .map(mapper)
                 .collectList()
                 .map(list -> PagerResult.of(param.getTotal(), list, param));
@@ -773,7 +857,13 @@ public interface QueryHelper {
             return Mono
                 .zip(
                     query.get().setParam(param.clone()).count(),
-                    query.get().setParam(param.clone()).fetch().map(mapper).collectList(),
+                    query
+                        .get()
+                        .setParam(param.clone())
+                        .fetch()
+                        .take(param.getPageSize())
+                        .map(mapper)
+                        .collectList(),
                     (total, data) -> PagerResult.of(total, data, param)
                 );
         }
@@ -791,6 +881,7 @@ public interface QueryHelper {
                     .get()
                     .setParam(rePagingQuery)
                     .fetch()
+                    .take(rePagingQuery.getPageSize())
                     .map(mapper)
                     .collectList()
                     .map(list -> PagerResult.of(total, list, rePagingQuery));

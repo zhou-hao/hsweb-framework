@@ -6,6 +6,7 @@ import lombok.Getter;
 import lombok.Setter;
 import org.hswebframework.web.api.crud.entity.EntityFactoryHolder;
 
+import java.io.Serial;
 import java.io.Serializable;
 
 @Getter
@@ -13,6 +14,7 @@ import java.io.Serializable;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class ResponseMessage<T> implements Serializable {
 
+    @Serial
     private static final long serialVersionUID = 8992436576262574064L;
 
     @Schema(description = "消息提示")

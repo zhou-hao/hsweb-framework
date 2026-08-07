@@ -1,5 +1,6 @@
 package org.hswebframework.web.crud.web;
 
+import org.hswebframework.web.crud.query.PagerQueryPolicy;
 import org.hswebframework.web.i18n.WebFluxLocaleFilter;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -7,6 +8,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.ReactiveAdapterRegistry;
@@ -16,7 +18,24 @@ import org.springframework.web.server.WebFilter;
 
 @AutoConfiguration
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.REACTIVE)
+@EnableConfigurationProperties(PagerQueryProperties.class)
 public class CommonWebFluxConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    public PagerQueryPolicy pagerQueryPolicy(PagerQueryProperties properties) {
+        return properties.createPolicy();
+    }
+
+    /**
+     * 将应用级不可变策略写入每次订阅的 Reactor Context，异步边界后仍由当前链路读取。
+     */
+    @Bean
+    public WebFilter pagerQueryPolicyWebFilter(PagerQueryPolicy policy) {
+        return (exchange, chain) -> chain
+            .filter(exchange)
+            .contextWrite(context -> PagerQueryPolicy.writeTo(context, policy));
+    }
 
     @Bean
     @ConditionalOnMissingBean

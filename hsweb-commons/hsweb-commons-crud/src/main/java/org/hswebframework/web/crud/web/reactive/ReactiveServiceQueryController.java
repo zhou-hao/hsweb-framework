@@ -95,16 +95,7 @@ public interface ReactiveServiceQueryController<E, K> {
     @QueryAction
     @QueryOperation(summary = "使用GET方式分页动态查询")
     default Mono<PagerResult<E>> queryPager(@Parameter(hidden = true) QueryParamEntity query) {
-        if (query.getTotal() != null) {
-            return getService()
-                .createQuery()
-                .setParam(query.rePaging(query.getTotal()))
-                .fetch()
-                .collectList()
-                .map(list -> PagerResult.of(query.getTotal(), list, query));
-        }
         return getService().queryPager(query);
-
     }
 
     /**

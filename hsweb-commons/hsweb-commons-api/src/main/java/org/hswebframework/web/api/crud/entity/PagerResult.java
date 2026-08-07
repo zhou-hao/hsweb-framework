@@ -45,6 +45,7 @@ import java.util.List;
 @Getter
 @Setter
 public class PagerResult<E> implements Serializable {
+    @Serial
     private static final long serialVersionUID = -6171751136953308027L;
 
     /**

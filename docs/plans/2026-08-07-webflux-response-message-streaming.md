@@ -224,6 +224,33 @@ HTTP 响应已经提交，无法再可靠改写状态码或完整 ResponseMessag
 - 默认使用 `writeWith`，不为每个元素强制 flush。若后续需要低延迟刷新，应基于媒体类型或
   有界批次单独设计，不能默认逐元素 `writeAndFlushWith`。
 
+### 8. queryPager 有界聚合保护
+
+`PagerResult.data` 是 `List<T>`，因此 `QueryHelper.queryPager(...)` 仍需要对当前页执行
+`collectList()`。页大小必须保持跨请求、跨节点稳定，不能根据 JVM 实时剩余内存动态变化，否则
+offset 分页可能重复或漏数。采用不可变 `PagerQueryPolicy` 统一规范化：
+
+- 默认阈值为 1000，保留 JVM 系统属性 `hsweb.max-pager-page-size`，并支持 Spring 配置
+  `hsweb.web.pageable.max-page-size`；配置值必须大于 0；
+- 默认溢出策略为兼容模式 `WARN`：显式 `pageSize > maxPageSize` 时记录不含查询条件的告警并保留
+  原值，避免 5.0.x 已有大页调用被静默截断；
+- `CLAMP` 将超大页截断到最大值，`PagerResult.pageSize` 返回规范化后的实际值；`REJECT` 返回
+  `pageSize` 参数校验错误；配置为 `hsweb.web.pageable.overflow-policy`；
+- `pageSize < 1` 时回退到 easy-orm 默认页大小，再受最大页大小约束；
+- `paging=false` 传入分页结果接口时，不受 `WARN` 兼容豁免，始终转换为最大受限页；真正的无分页
+  结果继续走返回 `Flux` 的 `/_query/no-paging`，大结果优先使用 NDJSON；
+- Spring WebFlux 将不可变策略 bean 写入 Reactor Context，`QueryHelper` 在订阅时读取；非 HTTP
+  调用使用稳定默认策略，也可通过显式策略/最大值重载或 `contextWrite` 指定业务级规则；
+- `ReactiveCrudService` 提供服务级 `resolvePagerQueryPolicy(ContextView)` 默认扩展点以及显式
+  `PagerQueryPolicy` 查询重载。策略优先级固定为“调用时显式策略 > 服务扩展点 > Reactor Context
+  > 框架默认策略”；默认扩展点只读取当前订阅上下文，不阻塞、不修改上下文，也不引入可变状态；
+- 查询参数先 `clone()`，不修改调用方对象；查询侧分页限制之外，`collectList()` 前再使用
+  `take(effectivePageSize)`，即使自定义 `ReactiveQuery` 未正确应用分页也不会超过当前策略实际允许
+  的数量；不使用可变全局字段模拟请求级配置。
+
+此保护只约束返回 `PagerResult` 的有界聚合链路，不限制显式流式查询，不修改数据库 SQL 方言、
+排序、总数复用或重新分页语义。
+
 ## 兼容与发布策略
 
 兼容对象来自已发布的 hsweb 响应协议和现有前端/外部调用方：
@@ -252,7 +279,15 @@ HTTP 响应已经提交，无法再可靠改写状态码或完整 ResponseMessag
 5. 调整 `ResponseMessageWrapper`：使用 ReactiveAdapterRegistry、官方内容协商和专用 writer，
    删除 Flux `collectList()` 及无效 `switchIfEmpty()`。
 6. 补 WebFlux 集成测试，验证首个 DataBuffer 在源完成前到达、JSON 外壳兼容、背压和取消。
-7. 运行目标模块测试与上游聚合测试；若实现假设变化，先更新本设计并重新确认。
+7. 为 `QueryHelper.queryPager(...)` 增加不可变 `PagerQueryPolicy`、策略/最大页大小重载、订阅期
+   Reactor Context 解析，以及 `collectList()` 前的 `take(effectivePageSize)` 最终保护；为
+   `ReactiveCrudService` 增加服务级策略解析扩展点和显式策略重载。
+8. 在 `CommonWebFluxConfiguration` 增加 `hsweb.web.pageable` 配置绑定和策略 WebFilter；默认
+   `WARN` 保持显式大页兼容，`CLAMP/REJECT` 由部署按容量开启。
+9. 补分页边界测试：默认页、0/负数、最大值、超大值、`paging=false`、三种溢出策略、并行/串行/
+   复用 total、调用方参数不变、Reactor Context 覆盖、Spring 属性绑定、服务策略覆盖、显式策略
+   优先级，以及查询源忽略分页时的最终限制与取消。
+10. 运行目标模块测试与上游聚合测试；若实现假设变化，先更新本设计并重新确认。
 
 ## 测试目标与验收标准
 
@@ -377,6 +412,28 @@ mvn -pl hsweb-starter,hsweb-commons/hsweb-commons-crud -am test
   `ResponseMessageWrapper` 和 `CustomJackson2jsonEncoder`，验证 HTTP 传输层而非直接调用 writer。
 - `hsweb-starter/pom.xml` 显式声明项目已有的 `io.micrometer:context-propagation` 依赖，并增加
   test-scope `reactor-netty-http` 用于真实 HTTP 集成测试，不改变发布依赖。
+- `hsweb-commons/hsweb-commons-crud/src/main/java/org/hswebframework/web/crud/query/QueryHelper.java`
+  的分页重载统一委托 `PagerQueryPolicy`，默认重载在订阅期从 Reactor Context 取策略；已知 total、
+  并行分页和串行分页三条 `collectList()` 链路前均增加 `take(effectivePageSize)`。显式
+  `maxPageSize` 重载固定采用 `CLAMP`，显式策略重载用于非 HTTP 或更严格的业务场景。
+- `hsweb-commons/hsweb-commons-crud/src/main/java/org/hswebframework/web/crud/query/PagerQueryPolicy.java`
+  是线程安全的不可变策略对象，统一处理默认页、非法小值、显式超大页和 `paging=false`；默认
+  `WARN` 保留已发布大页调用，`CLAMP` 截断，`REJECT` 返回 i18n 参数校验错误，并继续兼容
+  JVM 属性 `hsweb.max-pager-page-size`。
+- `PagerQueryProperties` 与 `CommonWebFluxConfiguration` 绑定
+  `hsweb.web.pageable.max-page-size` / `overflow-policy`，创建可覆盖的策略 bean，并由
+  WebFilter 写入每次请求的 Reactor Context；不依赖可变静态 Holder 或 ThreadLocal。
+- `ReactiveCrudService.queryPager(...)` 默认重载在每次订阅时调用
+  `resolvePagerQueryPolicy(ContextView)`；默认实现读取 Reactor Context，服务实现可覆盖为稳定的
+  业务级策略。调用时显式传入 `PagerQueryPolicy` 的重载优先级最高，并直接委托 `QueryHelper`，
+  不触发服务解析扩展点。
+- `hsweb-commons/hsweb-commons-crud/src/test/java/org/hswebframework/web/crud/query/QueryHelperPagerTest.java`
+  覆盖正常页、0/负数、显式大页兼容、`paging=false`、`WARN/CLAMP/REJECT`、已知/零 total、
+  并行/串行分页、映射、参数不变、Reactor Context 覆盖和上游取消。
+- `PagerQueryConfigurationTest` 使用 `ReactiveWebApplicationContextRunner` 验证 Spring 属性绑定、
+  自定义策略 bean back-off，以及经过 `publishOn` 异步边界后的 Reactor Context 传播。
+- `ReactiveCrudServicePagerPolicyTest` 验证默认服务经过 `publishOn` 后读取 Reactor Context、服务级
+  策略覆盖上下文、显式策略覆盖服务策略和上下文，以及显式策略便利重载。
 
 ### 已验证契约
 
@@ -401,6 +458,15 @@ mvn -pl hsweb-starter,hsweb-commons/hsweb-commons-crud -am test
   SSE 保持不包装。
 - 目标生产链路 `ResponseMessageWrapper` 和 `CustomJackson2jsonEncoder` 中已无
   `collectList()`；MVC `ResponseMessageWrapperAdvice` 不在本次范围内，仍保持原实现。
+- `QueryHelper.queryPager(...)` 仍按 `PagerResult<List<T>>` 契约聚合当前页，但页大小已同时受查询
+  参数和 Reactor `take` 约束；自定义查询忽略分页参数时，测试确认在实际上限处取消上游。
+- `pageSize < 1` 回退到受限默认值；显式超大页默认告警并保留旧值，可配置为截断或拒绝；
+  `paging=false` 无条件转换为最大受限页。规范化后的 `pageSize` 写入结果元数据，原始
+  `QueryParamEntity` 保持不变。
+- Spring WebFlux 请求和默认 `ReactiveCrudService` 在异步调度后仍从同一 Reactor Context 读取
+  不可变策略；自定义 `PagerQueryPolicy` bean 会替代自动配置。服务可覆盖
+  `resolvePagerQueryPolicy(ContextView)`，非 HTTP 链路也可通过显式重载或 `contextWrite` 使用
+  相同契约；显式重载不会调用服务解析器。
 
 定向验证命令通过：
 
@@ -413,6 +479,23 @@ mvn -pl hsweb-starter,hsweb-commons/hsweb-commons-crud -am \
 结果为 12/12 reactor modules success，相关测试 29 个全部通过：wrapper 10、writer 7、encoder 7、
 真实 HTTP 集成测试 5。10 万元素测试属于可重复的规模集成验证，用于证明传输层确实增量工作；它
 不等同于多并发、长时间运行并采集 JVM/Direct Memory 指标的正式容量压测。
+
+分页聚合保护执行：
+
+```bash
+mvn -pl hsweb-commons/hsweb-commons-crud -am \
+  -Dtest=QueryHelperPagerTest,PagerQueryConfigurationTest,ReactiveCrudServicePagerPolicyTest \
+  -Dsurefire.failIfNoSpecifiedTests=false test
+
+mvn -pl hsweb-commons/hsweb-commons-crud test
+```
+
+定向测试 17 个全部通过：`QueryHelperPagerTest` 11 个，
+`PagerQueryConfigurationTest` 2 个，`ReactiveCrudServicePagerPolicyTest` 4 个。目标模块全量结果为
+124 tests、0 failures、0 errors、1 skipped。JaCoCo 方法级结果：
+`QueryHelper.doQueryPager` 25/25 lines、4/4 branches；`PagerQueryPolicy.normalize` 15/15 lines、
+6/6 branches；`handleOverflow` 9/9 lines、3/3 branches；`ReactiveCrudService` 默认策略入口、
+两项显式策略重载和 `resolvePagerQueryPolicy` 均已覆盖。
 
 全量 `-am test` 在进入目标模块前被既有的
 `hsweb-datasource-api/DefaultSwitcherTest` 阻断（初始状态期望为空，实际为 `test`）。直接运行两个

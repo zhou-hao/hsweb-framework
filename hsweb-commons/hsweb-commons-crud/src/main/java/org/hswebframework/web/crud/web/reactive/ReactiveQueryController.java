@@ -9,6 +9,7 @@ import org.hswebframework.web.api.crud.entity.QueryOperation;
 import org.hswebframework.web.api.crud.entity.QueryParamEntity;
 import org.hswebframework.web.authorization.annotation.Authorize;
 import org.hswebframework.web.authorization.annotation.QueryAction;
+import org.hswebframework.web.crud.query.QueryHelper;
 import org.hswebframework.web.exception.NotFoundException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -100,22 +101,7 @@ public interface ReactiveQueryController<E, K> {
     @QueryAction
     @QueryOperation(summary = "使用GET方式分页动态查询")
     default Mono<PagerResult<E>> queryPager(@Parameter(hidden = true) QueryParamEntity query) {
-        if (query.getTotal() != null) {
-            return getRepository()
-                    .createQuery()
-                    .setParam(query.rePaging(query.getTotal()))
-                    .fetch()
-                    .collectList()
-                    .map(list -> PagerResult.of(query.getTotal(), list, query));
-        }
-
-        return Mono
-                .zip(
-                        getRepository().createQuery().setParam(query.clone()).count(),
-                        query(query.clone()).collectList(),
-                        (total, data) -> PagerResult.of(total, data, query)
-                );
-
+        return QueryHelper.queryPager(query,getRepository()::createQuery);
     }
 
 
