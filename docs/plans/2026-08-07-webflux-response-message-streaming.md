@@ -498,10 +498,16 @@ mvn -pl hsweb-commons/hsweb-commons-crud test
 两项显式策略重载和 `resolvePagerQueryPolicy` 均已覆盖。
 
 全量 `-am test` 在进入目标模块前被既有的
-`hsweb-datasource-api/DefaultSwitcherTest` 阻断（初始状态期望为空，实际为 `test`）。直接运行两个
-目标模块的全量测试时，`hsweb-commons-crud` 通过，`hsweb-starter/SystemInitializeTest` 因当前
-依赖组合缺少 `io.r2dbc.postgresql.codec.PostgresqlObjectId` 而失败；本次新增的 encoder、writer
-和 wrapper 测试均通过。这两个失败均未触达本次生产代码。
+`hsweb-datasource-api/DefaultSwitcherTest` 阻断（初始状态期望为空，实际为 `test`）。直接运行目标
+模块时，`hsweb-commons-crud` 全量测试通过。`hsweb-starter/SystemInitializeTest` 最初因 EasyORM
+初始化 H2 方言时同步初始化全部内置方言，而其 optional PostgreSQL 驱动不在测试类路径中，缺少
+`io.r2dbc.postgresql.codec.PostgresqlObjectId`。`hsweb-starter` 已显式增加 test-scope
+`r2dbc-postgresql`；Java 17 下定向运行 `SystemInitializeTest` 为 1 test、0 failures、0 errors。
+
+`hsweb-starter` 全量测试在本机 macOS 上继续运行到流式 HTTP 集成测试，其中
+`testFirstHttpChunkArrivesBeforePublisherCompletes` 出现 30 秒读取超时；同一测试在增加上述测试依赖前
+已通过 Linux CI，且依赖树中的 Reactor Netty 版本仍由项目现有 `1.2.9` 管理，因此不对生产实现做
+平台特调，以 PR 的 Linux CI 复跑结果作为最终判定。
 
 ### JavaBean 属性中嵌套 Flux 的结论
 
