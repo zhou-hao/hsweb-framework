@@ -56,6 +56,11 @@ public final class ReactiveAuthenticationHolder {
     }
 
     /**
+     * 获取当前登录的用户权限信息。
+     *
+     * <p>调用链显式写入的认证快照优先于 Supplier，供网关或上游过滤器在不改写全局
+     * Supplier 的情况下收敛本次请求的授权范围。</p>
+     *
      * @return 当前登录的用户权限信息
      */
     public static Mono<Authentication> get() {
@@ -63,6 +68,10 @@ public final class ReactiveAuthenticationHolder {
         return Mono.deferContextual(ctx -> {
             if (Boolean.TRUE.equals(ctx.getOrDefault(IGNORE_AUTH_KEY, false))) {
                 return Mono.empty();
+            }
+            Authentication authentication = ctx.getOrDefault(Authentication.class, null);
+            if (authentication != null) {
+                return Mono.just(authentication);
             }
             return get(ReactiveAuthenticationSupplier::get);
         });

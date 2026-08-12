@@ -143,4 +143,18 @@ public class AuthenticationTests {
 
 
     }
+
+    @Test
+    public void shouldPreferAuthenticationFromReactiveContext() {
+        Authentication authentication = builder
+            .user("{\"id\":\"scoped-user\",\"username\":\"scoped-user\"}")
+            .build();
+
+        Authentication
+            .currentReactive()
+            .contextWrite(Context.of(Authentication.class, authentication))
+            .as(StepVerifier::create)
+            .assertNext(actual -> assertSame(authentication, actual))
+            .verifyComplete();
+    }
 }
