@@ -65,6 +65,19 @@ public class FileUploadPropertiesTest {
 
     }
 
+    @Test
+    // https://github.com/hs-web/hsweb-framework/issues/362
+    public void testDenyWithTrailingSeparator() {
+        FileUploadProperties uploadProperties = new FileUploadProperties();
+        uploadProperties.setDenyFiles(new HashSet<>(Arrays.asList("jsp")));
+
+        assertTrue(uploadProperties.denied("x.jsp/", MediaType.ALL));
+        assertTrue(uploadProperties.denied("x.jsp\\", MediaType.ALL));
+
+        FileUploadProperties.StaticFileInfo fileInfo = uploadProperties.createStaticSavePath("x.jsp/");
+        assertTrue(fileInfo.getLocation().endsWith(".jsp"));
+    }
+
 
     @Test
     // https://github.com/hs-web/hsweb-framework/issues/344

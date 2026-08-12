@@ -62,6 +62,8 @@ public class FileUploadProperties {
     }
 
     public boolean denied(String name, MediaType mediaType) {
+        // 校验必须使用和落盘相同的有效文件名，避免尾部分隔符绕过扩展名黑名单。
+        name = normalizeFileName(name);
         String suffix = (name.contains(".") ? name.substring(name.lastIndexOf(".") + 1) : "").toLowerCase(Locale.ROOT);
         boolean defaultDeny = false;
         if (CollectionUtils.isNotEmpty(denyFiles)) {
@@ -103,11 +105,9 @@ public class FileUploadProperties {
         return name.substring(lastIndex).toLowerCase(Locale.ROOT);
     }
 
-    public StaticFileInfo createStaticSavePath(String name) {
-        String fileName = IDGenerator.SNOW_FLAKE_STRING.generate();
-        String filePath = DateFormatter.toString(new Date(), "yyyyMMdd");
+    private static String normalizeFileName(String name) {
         try {
-            name = Paths
+            return Paths
                 .get(Normalizer
                          .normalize(name, Normalizer.Form.NFKC)
                          .replace("\\", "/"))
@@ -116,6 +116,12 @@ public class FileUploadProperties {
         } catch (InvalidPathException e) {
             throw new AccessDenyException.NoStackTrace();
         }
+    }
+
+    public StaticFileInfo createStaticSavePath(String name) {
+        String fileName = IDGenerator.SNOW_FLAKE_STRING.generate();
+        String filePath = DateFormatter.toString(new Date(), "yyyyMMdd");
+        name = normalizeFileName(name);
 
         //文件后缀
         String suffix = resolveExtension(name);
