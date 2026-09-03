@@ -315,14 +315,15 @@ client_credentials 扩展：
 - 独立安全/兼容审查结论：无 P0-P2。malformed Basic、严格 UTF-8、脱敏 client 与无 fallback
   均已闭环。
 
-当前用户原有修改仍保留：
+实现前工作区中的用户原有修改均未被回退：
 
 - `hsweb-authorization-basic/src/main/java/org/hswebframework/web/authorization/basic/web/UserTokenWebFilter.java`
 - `hsweb-authorization/hsweb-authorization-oauth2/src/main/java/org/hswebframework/web/oauth2/server/credential/DefaultClientCredentialGranter.java`
 - `hsweb-authorization/hsweb-authorization-oauth2/src/main/java/org/hswebframework/web/oauth2/server/web/OAuth2AuthorizeController.java`
 
-其中 DefaultClientCredentialGranter 改为通过 ReactiveAuthenticationHolder 获取用户
-Authentication 的改动不是本功能新改；本次实现必须保持并已保持该用户改动。
+其中 `UserTokenWebFilter` 继续作为未提交改动保留在工作区，未进入本 PR；
+`DefaultClientCredentialGranter` 通过 `ReactiveAuthenticationHolder` 获取用户
+Authentication 的既有行为已在本功能提交中保持。
 
 本设计已按 oauth2-extension-v1.1 落地：客户端认证与 client_credentials 类型路由成为
 向后兼容的扩展点；token endpoint 向 granter/handler 移除 client_secret 是有意的安全收紧，
@@ -381,3 +382,8 @@ application，也未改 `AccessTokenManager` 或 Token 模型。
 ReactiveAuthenticationHolder 的 HTTP 成功链与 OAuth2GrantedEvent/removeToken rollback 集成测试，
 以避免静态 Holder 的全局测试污染。已有 default handler 透明委托与 auto-configuration 测试；
 实际 DefaultClientCredentialGranter 的 event/rollback 仍是剩余验证风险。
+
+### 交付
+
+- 功能提交：`1f8a4d521 feat(oauth2)!: 扩展客户端认证与凭证授权`
+- Pull Request：<https://github.com/hs-web/hsweb-framework/pull/367>
