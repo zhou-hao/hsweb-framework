@@ -112,7 +112,8 @@ Bearer 或有状态 Token。`UserTokenWebFilter` 继续保留原有 `ReactiveLog
   UserTokenManager”测试锁定。
 - 顺序风险：高优先级 Parser 执行 I/O 会阻塞后续 Parser，因此 SPI 契约要求 Parser 只做
   低成本识别，完整认证留在 Provider。
-- 验证结果见下节；模块级测试的环境依赖缺口不通过生产代码特调处理。
+- 验证结果见下节；authorization-basic 测试装配显式声明 EasyORM 初始化所需的
+  PostgreSQL R2DBC 测试依赖，不向生产依赖或认证逻辑扩散。
 - TraceHolder：不新增手动 span；本次是现有 HTTP 请求内的认证路由，没有新增跨服务或
   后台异步边界，且不得将原始 Token 写入 trace。
 - MBean：不适用；本次不新增缓存、队列、后台任务或其他常驻状态。
@@ -125,9 +126,8 @@ Bearer 或有状态 Token。`UserTokenWebFilter` 继续保留原有 `ReactiveLog
   执行成功，9 项测试通过，0 失败、0 错误、0 跳过。
 - authorization-api 模块全量：17 项测试，0 失败、0 错误、1 项
   `RedisUserTokenManagerTest` 跳过。
-- authorization-basic 模块全量执行 7 项：6 项通过；
-  `AopAuthorizingControllerTest` 在 ApplicationContext 初始化阶段因运行时缺少
-  `io.r2dbc.postgresql.codec.PostgresqlObjectId` 发生 1 个错误，尚未进入本次认证代码。
-- 环境依赖补齐后待复验命令：
-  `mvn -pl hsweb-authorization/hsweb-authorization-api,hsweb-authorization/hsweb-authorization-basic test`。
+- CI 同范围复验：
+  `./mvnw test -q -pl hsweb-authorization/hsweb-authorization-api,hsweb-authorization/hsweb-authorization-basic`
+  执行成功；authorization-api 共 17 项，0 失败、0 错误、1 项跳过；
+  authorization-basic 共 7 项，0 失败、0 错误、0 跳过。
 - `git diff --check` 通过。
