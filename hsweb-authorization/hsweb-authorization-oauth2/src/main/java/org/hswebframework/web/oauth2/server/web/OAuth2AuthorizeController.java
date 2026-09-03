@@ -59,7 +59,13 @@ public class OAuth2AuthorizeController {
 
     private final ReactiveOAuth2ClientAuthenticator clientAuthenticator;
 
+    /**
+     * 兼容旧的三参数构造方式，也作为组件扫描场景未提供认证器 Bean 时的回退。
+     *
+     * @deprecated 优先注入 {@link ReactiveOAuth2ClientAuthenticator} 使用四参数构造器。
+     */
     @Deprecated
+    @Autowired(required = false)
     public OAuth2AuthorizeController(OAuth2GrantService oAuth2GrantService,
                                      OAuth2ClientManager clientManager,
                                      OAuth2Properties properties) {
@@ -69,7 +75,10 @@ public class OAuth2AuthorizeController {
              new DefaultReactiveOAuth2ClientAuthenticator(clientManager));
     }
 
-    @Autowired
+    /**
+     * 使用已注册的客户端认证器；组件扫描时会优先选择依赖可满足的四参数构造器。
+     */
+    @Autowired(required = false)
     public OAuth2AuthorizeController(OAuth2GrantService oAuth2GrantService,
                                      OAuth2ClientManager clientManager,
                                      OAuth2Properties properties,

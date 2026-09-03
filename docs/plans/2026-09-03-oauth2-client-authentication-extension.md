@@ -415,6 +415,12 @@ ReactiveAuthenticationHolder 的 HTTP 成功链与 OAuth2GrantedEvent/removeToke
 - 本阶段不改 OAuth2 grant type、AccessToken、授权码、refresh token 或权限模型。
 - 不新增 TraceHolder 或 MBean；本次只传播既有请求内的客户端元数据，不增加异步、缓存、
   队列或常驻状态边界。
+- EasyORM 会预初始化全部内置方言，其 PostgreSQL 方言直接引用驱动类型；
+  `hsweb-commons-crud` 统一提供 `r2dbc-postgresql` runtime 依赖，下游模块不再重复声明
+  test workaround。
+- `OAuth2AuthorizeController` 既支持 AutoConfiguration，也兼容组件扫描。组件扫描时若已注册
+  `ReactiveOAuth2ClientAuthenticator` 则使用四参数构造器，否则回退到兼容三参数构造器；
+  不依赖不同模块 AutoConfiguration 的条件评估时序。
 
 ### 已实现的兼容策略
 
@@ -440,9 +446,13 @@ ReactiveAuthenticationHolder 的 HTTP 成功链与 OAuth2GrantedEvent/removeToke
 - `hsweb-authorization/hsweb-authorization-oauth2/src/main/java/org/hswebframework/web/oauth2/server/`
   下的 `OAuth2Client.java`、`authentication/OAuth2ClientAuthentication.java`、
   `authentication/DefaultReactiveOAuth2ClientAuthenticator.java`、
-  `credential/DefaultClientCredentialGranter.java` 与 `credential/ClientCredentialRequest.java`。
+  `credential/DefaultClientCredentialGranter.java`、`credential/ClientCredentialRequest.java` 与
+  `web/OAuth2AuthorizeController.java`。
 - `hsweb-system/hsweb-system-authorization/hsweb-system-authorization-oauth2/src/main/java/org/`
   `hswebframework/web/oauth2/entity/OAuth2ClientEntity.java`。
+- `hsweb-commons/hsweb-commons-crud/pom.xml`；
+  `hsweb-authorization/hsweb-authorization-basic/pom.xml` 与 `hsweb-starter/pom.xml` 删除重复
+  PostgreSQL test 依赖。
 - `hsweb-authorization/hsweb-authorization-oauth2/src/test/java/org/hswebframework/web/oauth2/server/`
   下的 `OAuth2ClientTest.java`、`OAuth2ServerAutoConfigurationTest.java`、
   `authentication/DefaultReactiveOAuth2ClientAuthenticatorTest.java`、
@@ -463,6 +473,15 @@ ReactiveAuthenticationHolder 的 HTTP 成功链与 OAuth2GrantedEvent/removeToke
 结果为 18/18 Reactor 验证通过，39 tests，0 failures/errors/skips；`git diff --check` 通过。覆盖
 默认、`null`、空白与显式类型的传播，显式认证上下文与脱敏 client 视图的一致性，HTTP 同名参数
 不参与路由、secret 脱敏，以及旧三参数 granter 的认证管理器兼容行为。
+
+CI 暴露的 EasyORM 驱动与组件扫描装配问题修复后，集中执行：
+
+```shell
+./mvnw test -q -pl hsweb-commons/hsweb-commons-crud,hsweb-authorization/hsweb-authorization-basic,hsweb-starter,hsweb-authorization/hsweb-authorization-oauth2,hsweb-system/hsweb-system-authorization/hsweb-system-authorization-oauth2
+```
+
+结果为 5 个模块共 205 tests，0 failures/errors，3 skipped；原失败上下文
+`OAuth2ClientManagerAutoConfigurationTest` 已通过，`git diff --check` 通过。
 
 ### 交付
 
