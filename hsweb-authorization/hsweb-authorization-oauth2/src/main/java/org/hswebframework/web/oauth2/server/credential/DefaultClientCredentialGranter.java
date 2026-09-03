@@ -1,6 +1,6 @@
 package org.hswebframework.web.oauth2.server.credential;
 
-import lombok.AllArgsConstructor;
+import org.hswebframework.web.authorization.ReactiveAuthenticationHolder;
 import org.hswebframework.web.authorization.ReactiveAuthenticationManager;
 import org.hswebframework.web.oauth2.GrantType;
 import org.hswebframework.web.oauth2.server.AccessToken;
@@ -10,22 +10,31 @@ import org.hswebframework.web.oauth2.server.event.OAuth2GrantedEvent;
 import org.springframework.context.ApplicationEventPublisher;
 import reactor.core.publisher.Mono;
 
-@AllArgsConstructor
 public class DefaultClientCredentialGranter implements ClientCredentialGranter {
-
-    private final ReactiveAuthenticationManager authenticationManager;
 
     private final AccessTokenManager accessTokenManager;
 
     private final ApplicationEventPublisher eventPublisher;
+
+    public DefaultClientCredentialGranter(AccessTokenManager accessTokenManager,
+                                          ApplicationEventPublisher eventPublisher) {
+        this.accessTokenManager = accessTokenManager;
+        this.eventPublisher = eventPublisher;
+    }
+
+    public DefaultClientCredentialGranter(ReactiveAuthenticationManager authenticationManager,
+                                          AccessTokenManager accessTokenManager,
+                                          ApplicationEventPublisher eventPublisher) {
+        this(accessTokenManager, eventPublisher);
+    }
 
     @Override
     public Mono<AccessToken> requestToken(ClientCredentialRequest request) {
 
         OAuth2Client client = request.getClient();
 
-        return authenticationManager
-                .getByUserId(client.getUserId())
+        return ReactiveAuthenticationHolder
+                .get(client.getUserId())
                 .flatMap(auth -> accessTokenManager
                         .createAccessToken(client.getClientId(), auth, true)
                         .flatMap(token -> new OAuth2GrantedEvent(client,
