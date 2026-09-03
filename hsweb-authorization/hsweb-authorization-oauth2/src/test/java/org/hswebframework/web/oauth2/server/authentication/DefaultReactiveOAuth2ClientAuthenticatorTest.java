@@ -30,9 +30,40 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
                 assertEquals(client.getClientId(), authentication.getClient().getClientId());
                 assertNull(authentication.getClient().getClientSecret());
                 assertEquals("secret", client.getClientSecret());
-                assertEquals(OAuth2ClientAuthentication.DEFAULT_CLIENT_TYPE,
+                assertEquals(OAuth2Client.DEFAULT_CLIENT_TYPE,
                              authentication.getClientType());
+                assertEquals(OAuth2Client.DEFAULT_CLIENT_TYPE,
+                             authentication.getClient().getClientType());
                 assertTrue(authentication.getAttributes().isEmpty());
+            })
+            .verifyComplete();
+    }
+
+    @Test
+    public void shouldPropagateTrustedClientTypeToSanitizedAuthenticationContext() {
+        OAuth2Client client = client("test", "secret");
+        client.setClientType("api");
+        DefaultReactiveOAuth2ClientAuthenticator authenticator =
+            new DefaultReactiveOAuth2ClientAuthenticator(id -> Mono.just(client));
+        Map<String, String> untrustedParameters = new HashMap<>();
+        untrustedParameters.put("client_type", "untrusted");
+        untrustedParameters.put("clientType", "untrusted");
+        OAuth2ClientAuthenticationRequest request = new OAuth2ClientAuthenticationRequest(
+            "test",
+            OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
+            "secret".toCharArray(),
+            "client_credentials",
+            untrustedParameters);
+
+        authenticator
+            .authenticate(request)
+            .as(StepVerifier::create)
+            .assertNext(authentication -> {
+                assertEquals("api", authentication.getClientType());
+                assertEquals("api", authentication.getClient().getClientType());
+                assertNotSame(client, authentication.getClient());
+                assertNull(authentication.getClient().getClientSecret());
+                assertEquals("secret", client.getClientSecret());
             })
             .verifyComplete();
     }
@@ -165,6 +196,7 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
         assertNull(authentication.getClient().getClientSecret());
         assertEquals("secret", client.getClientSecret());
         assertEquals("api", authentication.getClientType());
+        assertEquals("api", authentication.getClient().getClientType());
         assertEquals("credential-1", authentication.getAttributes().get("credentialId"));
         assertFalse(authentication.getAttributes().containsKey("client_secret"));
         try {

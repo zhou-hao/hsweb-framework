@@ -1,6 +1,9 @@
 package org.hswebframework.web.oauth2.server;
 
 import org.hswebframework.web.authorization.Authentication;
+import org.hswebframework.web.authorization.AuthenticationRequest;
+import org.hswebframework.web.authorization.ReactiveAuthenticationManager;
+import org.hswebframework.web.authorization.simple.SimpleAuthentication;
 import org.hswebframework.web.oauth2.server.authentication.DefaultReactiveOAuth2ClientAuthenticator;
 import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthentication;
 import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticator;
@@ -21,10 +24,11 @@ import reactor.test.StepVerifier;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -81,7 +85,7 @@ public class OAuth2ServerAutoConfigurationTest {
         AnnotationConfigReactiveWebApplicationContext context = contextWithInfrastructure();
         context.getBeanFactory().registerSingleton(
                 "conflictingDefaultHandler",
-                handler(OAuth2ClientAuthentication.DEFAULT_CLIENT_TYPE, new AccessToken()));
+                handler(OAuth2Client.DEFAULT_CLIENT_TYPE, new AccessToken()));
 
         try {
             refresh(context);
@@ -110,21 +114,80 @@ public class OAuth2ServerAutoConfigurationTest {
     }
 
     @Test
-    public void shouldRetainDefaultGranterConstructorCompatibility() {
-        AccessTokenManager accessTokenManager = new StubAccessTokenManager();
+    public void shouldUseManagerForLegacyThreeArgumentGranterConstructor() {
+        Authentication expectedAuthentication = SimpleAuthentication.of();
+        AccessToken expectedToken = new AccessToken("legacy-token", null, 60);
+        AtomicInteger managerCalls = new AtomicInteger();
+        AtomicReference<String> requestedUserId = new AtomicReference<>();
+        ReactiveAuthenticationManager authenticationManager = new ReactiveAuthenticationManager() {
+            @Override
+            public Mono<Authentication> authenticate(Mono<AuthenticationRequest> request) {
+                return Mono.error(new AssertionError("authenticate must not be used"));
+            }
 
-        DefaultClientCredentialGranter current = new DefaultClientCredentialGranter(
-                accessTokenManager,
-                event -> {
-                });
+            @Override
+            public Mono<Authentication> getByUserId(String userId) {
+                managerCalls.incrementAndGet();
+                requestedUserId.set(userId);
+                return Mono.just(expectedAuthentication);
+            }
+        };
+        AtomicInteger createCalls = new AtomicInteger();
+        AtomicReference<String> requestedClientId = new AtomicReference<>();
+        AtomicReference<Authentication> tokenAuthentication = new AtomicReference<>();
+        AtomicReference<Boolean> singleton = new AtomicReference<>();
+        AccessTokenManager accessTokenManager = new AccessTokenManager() {
+            @Override
+            public Mono<Authentication> getAuthenticationByToken(String accessToken) {
+                return Mono.empty();
+            }
+
+            @Override
+            public Mono<AccessToken> createAccessToken(String clientId,
+                                                       Authentication authentication,
+                                                       boolean singletonToken) {
+                createCalls.incrementAndGet();
+                requestedClientId.set(clientId);
+                tokenAuthentication.set(authentication);
+                singleton.set(singletonToken);
+                return Mono.just(expectedToken);
+            }
+
+            @Override
+            public Mono<AccessToken> refreshAccessToken(String clientId, String refreshToken) {
+                return Mono.empty();
+            }
+
+            @Override
+            public Mono<Void> removeToken(String clientId, String token) {
+                return Mono.empty();
+            }
+
+            @Override
+            public Mono<Void> cancelGrant(String clientId, String userId) {
+                return Mono.empty();
+            }
+        };
         DefaultClientCredentialGranter legacy = new DefaultClientCredentialGranter(
-                null,
+                authenticationManager,
                 accessTokenManager,
                 event -> {
                 });
+        OAuth2Client client = new OAuth2Client();
+        client.setClientId("client");
+        client.setUserId("user-id");
 
-        assertNotNull(current);
-        assertNotNull(legacy);
+        StepVerifier
+                .create(legacy.requestToken(new ClientCredentialRequest(client, Collections.emptyMap())))
+                .expectNext(expectedToken)
+                .verifyComplete();
+
+        assertEquals(1, managerCalls.get());
+        assertEquals("user-id", requestedUserId.get());
+        assertEquals(1, createCalls.get());
+        assertEquals("client", requestedClientId.get());
+        assertSame(expectedAuthentication, tokenAuthentication.get());
+        assertEquals(Boolean.TRUE, singleton.get());
     }
 
     private static AnnotationConfigReactiveWebApplicationContext contextWithInfrastructure() {

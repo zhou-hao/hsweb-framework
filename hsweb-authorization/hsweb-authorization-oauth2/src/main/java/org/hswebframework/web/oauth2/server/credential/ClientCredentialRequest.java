@@ -14,7 +14,10 @@ import java.util.Map;
  * programmatic compatibility and therefore may expose fields present on that object. Token endpoint
  * integrations should use the authenticated-context constructor with parameters already sanitized
  * by the HTTP boundary; that path exposes the secret-free client projection from
- * {@link OAuth2ClientAuthentication}.</p>
+ * {@link OAuth2ClientAuthentication}. Except for removed sensitive values such as
+ * {@code client_secret}, parameters remain request data and must not be used to derive the client
+ * identity or type. Handlers must use {@link #getClientAuthentication()} as the trusted
+ * authentication result.</p>
  *
  * @author zhouhao
  * @since 5.0.2
@@ -48,7 +51,9 @@ public class ClientCredentialRequest extends OAuth2Request {
      *
      * <p>The token endpoint uses this constructor after removing {@code client_secret} from the
      * parameters. Callers outside that boundary are responsible for supplying an equally sanitized
-     * map.</p>
+     * map. The remaining parameters are still request data: neither client identity nor
+     * {@code clientType} may be derived from them. Handlers must route and authorize using
+     * {@link #getClientAuthentication()}.</p>
      *
      * @param clientAuthentication non-null authenticated client context
      * @param parameters grant parameters that have already been sanitized

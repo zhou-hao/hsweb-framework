@@ -24,8 +24,6 @@ import java.util.Objects;
 @Getter
 public class OAuth2ClientAuthentication {
 
-    public static final String DEFAULT_CLIENT_TYPE = "default";
-
     private final OAuth2Client client;
 
     private final String clientType;
@@ -33,12 +31,14 @@ public class OAuth2ClientAuthentication {
     private final Map<String, Object> attributes;
 
     /**
-     * Create a context for the legacy default client type.
+     * Create a context using the trusted type configured on the client.
      *
      * @param client authenticated source client; copied into a secret-free projection
      */
     public OAuth2ClientAuthentication(OAuth2Client client) {
-        this(client, DEFAULT_CLIENT_TYPE, Collections.emptyMap());
+        this(client,
+             Objects.requireNonNull(client, "client must not be null").getClientType(),
+             Collections.emptyMap());
     }
 
     /**
@@ -52,11 +52,12 @@ public class OAuth2ClientAuthentication {
     public OAuth2ClientAuthentication(OAuth2Client client,
                                       String clientType,
                                       Map<String, Object> attributes) {
-        this.client = createClientView(Objects.requireNonNull(client, "client must not be null"));
+        OAuth2Client source = Objects.requireNonNull(client, "client must not be null");
         if (!StringUtils.hasText(clientType)) {
             throw new IllegalArgumentException("clientType must not be empty");
         }
         this.clientType = clientType;
+        this.client = createClientView(source, clientType);
         if (attributes == null || attributes.isEmpty()) {
             this.attributes = Collections.emptyMap();
         } else {
@@ -66,13 +67,14 @@ public class OAuth2ClientAuthentication {
         }
     }
 
-    private static OAuth2Client createClientView(OAuth2Client source) {
+    private static OAuth2Client createClientView(OAuth2Client source, String clientType) {
         OAuth2Client client = new OAuth2Client();
         client.setClientId(source.getClientId());
         client.setName(source.getName());
         client.setDescription(source.getDescription());
         client.setRedirectUrl(source.getRedirectUrl());
         client.setUserId(source.getUserId());
+        client.setClientType(clientType);
         return client;
     }
 }

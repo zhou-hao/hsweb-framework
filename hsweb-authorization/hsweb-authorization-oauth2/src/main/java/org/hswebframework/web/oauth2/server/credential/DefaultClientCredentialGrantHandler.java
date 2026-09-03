@@ -1,7 +1,7 @@
 package org.hswebframework.web.oauth2.server.credential;
 
 import org.hswebframework.web.oauth2.server.AccessToken;
-import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthentication;
+import org.hswebframework.web.oauth2.server.OAuth2Client;
 import reactor.core.publisher.Mono;
 
 import java.util.Objects;
@@ -9,7 +9,7 @@ import java.util.Objects;
 /**
  * Adapts the legacy user-backed {@link ClientCredentialGranter} as the default typed handler.
  *
- * <p>It declares {@link OAuth2ClientAuthentication#DEFAULT_CLIENT_TYPE} and delegates the selected
+ * <p>It declares {@link OAuth2Client#DEFAULT_CLIENT_TYPE} and delegates the selected
  * request unchanged. Handler selection and unknown-type rejection remain the responsibility of
  * {@link CompositeClientCredentialGranter}; this adapter performs no fallback.</p>
  *
@@ -33,7 +33,7 @@ public final class DefaultClientCredentialGrantHandler implements ClientCredenti
 
     @Override
     public String getClientType() {
-        return OAuth2ClientAuthentication.DEFAULT_CLIENT_TYPE;
+        return OAuth2Client.DEFAULT_CLIENT_TYPE;
     }
 
     @Override

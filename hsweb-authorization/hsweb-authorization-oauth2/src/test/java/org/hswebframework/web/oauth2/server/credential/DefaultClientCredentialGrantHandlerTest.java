@@ -2,7 +2,6 @@ package org.hswebframework.web.oauth2.server.credential;
 
 import org.hswebframework.web.oauth2.server.AccessToken;
 import org.hswebframework.web.oauth2.server.OAuth2Client;
-import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthentication;
 import org.junit.Test;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
@@ -28,7 +27,7 @@ public class DefaultClientCredentialGrantHandlerTest {
         DefaultClientCredentialGrantHandler handler =
                 new DefaultClientCredentialGrantHandler(delegate);
 
-        assertEquals(OAuth2ClientAuthentication.DEFAULT_CLIENT_TYPE, handler.getClientType());
+        assertEquals(OAuth2Client.DEFAULT_CLIENT_TYPE, handler.getClientType());
         Mono<AccessToken> actualPublisher = handler.requestToken(request);
         assertSame(request, delegatedRequest.get());
         assertSame(expectedPublisher, actualPublisher);

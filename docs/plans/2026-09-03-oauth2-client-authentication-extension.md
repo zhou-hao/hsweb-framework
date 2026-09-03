@@ -387,3 +387,83 @@ ReactiveAuthenticationHolder 的 HTTP 成功链与 OAuth2GrantedEvent/removeToke
 
 - 功能提交：`1f8a4d521 feat(oauth2)!: 扩展客户端认证与凭证授权`
 - Pull Request：<https://github.com/hs-web/hsweb-framework/pull/367>
+
+## 13. v1.3 客户端类型可信配置、持久化兼容与传播
+
+### 目标与影响范围
+
+`clientType` 必须能够由服务端可信客户端配置指定，并在默认认证链中完整传播：
+
+    OAuth2ClientManager
+      -> OAuth2Client.clientType
+      -> DefaultReactiveOAuth2ClientAuthenticator
+      -> OAuth2ClientAuthentication.clientType
+      -> CompositeClientCredentialGranter
+      -> ClientCredentialGrantHandler
+
+影响模块为 `hsweb-authorization-oauth2` 的客户端模型、认证上下文和测试，以及
+`hsweb-system-authorization-oauth2` 的数据库客户端实体与转换逻辑。`OAuth2Client` 使用开放
+字符串字段；其 getter 将历史 `null` 或空白值归一为 `default`，不改变原 Handler 路由。
+
+### 边界与非目标
+
+- `clientType` 只能来自 `OAuth2ClientManager` 返回的可信元数据，或由完成凭证校验的自定义
+  `ReactiveOAuth2ClientAuthenticator` 显式覆盖。HTTP 的 `client_type`、`clientType` 可以作为
+  普通 parameters 保留给业务，但均为不可信输入，不得参与路由；handler 必须读取认证上下文
+  的 `clientType`。
+- 类型是开放字符串而不是 hsweb 内置枚举，避免 hsweb 依赖 JetLinks API application 类型。
+- 本阶段不改 OAuth2 grant type、AccessToken、授权码、refresh token 或权限模型。
+- 不新增 TraceHolder 或 MBean；本次只传播既有请求内的客户端元数据，不增加异步、缓存、
+  队列或常驻状态边界。
+
+### 已实现的兼容策略
+
+1. `OAuth2Client` 增加默认值为 `default` 的开放 `clientType` 字段，并对历史 `null`/空白值
+   统一回落。
+2. `OAuth2ClientAuthentication(OAuth2Client)` 从已认证客户端读取类型，脱敏客户端视图继续
+   保留该非敏感字段。显式 `OAuth2ClientAuthentication(client, type, attributes)` 必须将脱敏
+   client 视图覆盖为相同的 `type`，消除认证上下文与 client 兼容视图类型不一致的风险。
+3. `OAuth2ClientEntity.clientType` 保持可空，不做字段初始化，也不加 `@NotBlank`；保留
+   `@DefaultValue("default")`，它仅作为 EasyORM insert 的运行时默认值。`toOAuth2Client()`
+   传播原始值，由 `OAuth2Client` getter 完成归一。
+
+   自动 DDL 只会以 NativeSql 生成数据库 `DEFAULT`，不能安全地以 `nullable=false` 向已有表
+   增列；缺字段 JSON 反序列化为 `null`，且 EasyORM 更新忽略 `null`，因此不会由旧客户端覆盖
+   已存的显式类型。v1.3 通过可空列兼容，无需强制迁移；未做方言 SQL 迁移或数据库
+   not-null 收紧。未来若需收紧约束，必须另行提供幂等迁移。
+4. 旧三参数 `DefaultClientCredentialGranter` 构造器标记弃用但保留原
+   `ReactiveAuthenticationManager#getByUserId` 行为；新二参数构造器继续使用
+   `ReactiveAuthenticationHolder`。
+
+### 关键代码落点
+
+- `hsweb-authorization/hsweb-authorization-oauth2/src/main/java/org/hswebframework/web/oauth2/server/`
+  下的 `OAuth2Client.java`、`authentication/OAuth2ClientAuthentication.java`、
+  `authentication/DefaultReactiveOAuth2ClientAuthenticator.java`、
+  `credential/DefaultClientCredentialGranter.java` 与 `credential/ClientCredentialRequest.java`。
+- `hsweb-system/hsweb-system-authorization/hsweb-system-authorization-oauth2/src/main/java/org/`
+  `hswebframework/web/oauth2/entity/OAuth2ClientEntity.java`。
+- `hsweb-authorization/hsweb-authorization-oauth2/src/test/java/org/hswebframework/web/oauth2/server/`
+  下的 `OAuth2ClientTest.java`、`OAuth2ServerAutoConfigurationTest.java`、
+  `authentication/DefaultReactiveOAuth2ClientAuthenticatorTest.java`、
+  `credential/CompositeClientCredentialGranterTest.java`、
+  `credential/DefaultClientCredentialGrantHandlerTest.java` 与
+  `web/OAuth2TokenEndpointAutoConfigurationIntegrationTest.java`；
+  `hsweb-system/hsweb-system-authorization/hsweb-system-authorization-oauth2/src/test/java/org/`
+  `hswebframework/web/oauth2/entity/OAuth2ClientEntityTest.java`。
+
+### 验证结果
+
+已集中执行一次：
+
+```shell
+./mvnw test -pl hsweb-authorization/hsweb-authorization-oauth2,hsweb-system/hsweb-system-authorization/hsweb-system-authorization-oauth2 -am -Dtest=OAuth2ClientTest,DefaultReactiveOAuth2ClientAuthenticatorTest,CompositeClientCredentialGranterTest,DefaultClientCredentialGrantHandlerTest,OAuth2ServerAutoConfigurationTest,OAuth2TokenEndpointAutoConfigurationIntegrationTest,OAuth2ClientEntityTest -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+结果为 18/18 Reactor 验证通过，39 tests，0 failures/errors/skips；`git diff --check` 通过。覆盖
+默认、`null`、空白与显式类型的传播，显式认证上下文与脱敏 client 视图的一致性，HTTP 同名参数
+不参与路由、secret 脱敏，以及旧三参数 granter 的认证管理器兼容行为。
+
+### 交付
+
+- Pull Request：<https://github.com/hs-web/hsweb-framework/pull/367>

@@ -191,6 +191,69 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
     }
 
     @Test
+    public void shouldRouteByTrustedManagerClientTypeAndIgnoreForgedRequestType() {
+        OAuth2Client trustedClient = client("trusted-api-client", "trusted-api-secret");
+        trustedClient.setClientType("api");
+        AtomicInteger managerCalls = new AtomicInteger();
+        AtomicReference<String> requestedClientId = new AtomicReference<>();
+        OAuth2ClientManager clientManager = clientId -> {
+            managerCalls.incrementAndGet();
+            requestedClientId.set(clientId);
+            return Mono.just(trustedClient);
+        };
+        AtomicInteger handlerCalls = new AtomicInteger();
+        AtomicReference<ClientCredentialRequest> grantRequest = new AtomicReference<>();
+        ClientCredentialGrantHandler handler = handler("api", request -> {
+            handlerCalls.incrementAndGet();
+            grantRequest.set(request);
+            return Mono.just(new AccessToken("trusted-api-token", null, 30));
+        });
+        RecordingAccessTokenManager accessTokenManager = new RecordingAccessTokenManager();
+
+        try (AnnotationConfigReactiveWebApplicationContext context =
+                 defaultAuthenticatorContext(accessTokenManager, clientManager, handler)) {
+            context.refresh();
+
+            assertTrue(context.getBean(ReactiveOAuth2ClientAuthenticator.class)
+                              instanceof DefaultReactiveOAuth2ClientAuthenticator);
+            assertTrue(context.getBean(ClientCredentialGranter.class)
+                              instanceof CompositeClientCredentialGranter);
+
+            webClient(context)
+                .post()
+                .uri("/oauth2/token")
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .body(BodyInserters
+                          .fromFormData("grant_type", "client_credentials")
+                          .with("client_id", "trusted-api-client")
+                          .with("client_secret", "trusted-api-secret")
+                          .with("client_type", OAuth2Client.DEFAULT_CLIENT_TYPE)
+                          .with("clientType", OAuth2Client.DEFAULT_CLIENT_TYPE))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .consumeWith(result -> {
+                    assertNotNull(result.getResponseBody());
+                    String body = new String(result.getResponseBody(), StandardCharsets.UTF_8);
+                    assertTrue(body.contains("trusted-api-token"));
+                    assertFalse(body.contains("trusted-api-secret"));
+                });
+
+            assertEquals(1, managerCalls.get());
+            assertEquals("trusted-api-client", requestedClientId.get());
+            assertEquals(1, handlerCalls.get());
+            assertEquals("api", grantRequest.get().getClientAuthentication().getClientType());
+            assertEquals("api", grantRequest.get().getClient().getClientType());
+            assertNull(grantRequest.get().getClient().getClientSecret());
+            assertEquals(OAuth2Client.DEFAULT_CLIENT_TYPE,
+                         grantRequest.get().getParameters().get("client_type"));
+            assertEquals(OAuth2Client.DEFAULT_CLIENT_TYPE,
+                         grantRequest.get().getParameters().get("clientType"));
+            assertEquals(0, accessTokenManager.createCalls.get());
+        }
+    }
+
+    @Test
     public void shouldStopBeforeHandlersWhenApiSecretIsRejected() {
         AtomicInteger authenticatorCalls = new AtomicInteger();
         AtomicInteger handlerCalls = new AtomicInteger();
@@ -324,6 +387,22 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
             "apiClientAuthenticator",
             ReactiveOAuth2ClientAuthenticator.class,
             () -> authenticator);
+        context.registerBean(
+            "apiClientCredentialGrantHandler",
+            ClientCredentialGrantHandler.class,
+            () -> handler);
+        return context;
+    }
+
+    private AnnotationConfigReactiveWebApplicationContext defaultAuthenticatorContext(
+        RecordingAccessTokenManager accessTokenManager,
+        OAuth2ClientManager clientManager,
+        ClientCredentialGrantHandler handler) {
+        AnnotationConfigReactiveWebApplicationContext context = baseContext(accessTokenManager);
+        context.registerBean(
+            "oAuth2ClientManager",
+            OAuth2ClientManager.class,
+            () -> clientManager);
         context.registerBean(
             "apiClientCredentialGrantHandler",
             ClientCredentialGrantHandler.class,

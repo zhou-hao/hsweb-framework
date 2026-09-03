@@ -3,6 +3,7 @@ package org.hswebframework.web.oauth2.server.authentication;
 import lombok.AllArgsConstructor;
 import org.hswebframework.web.oauth2.ErrorType;
 import org.hswebframework.web.oauth2.OAuth2Exception;
+import org.hswebframework.web.oauth2.server.OAuth2Client;
 import org.hswebframework.web.oauth2.server.OAuth2ClientManager;
 import reactor.core.publisher.Mono;
 
@@ -12,7 +13,7 @@ import java.util.Arrays;
  * Default client authenticator backed by the legacy {@link OAuth2ClientManager}.
  *
  * <p>It loads the configured client, validates its client secret, and produces the
- * {@link OAuth2ClientAuthentication#DEFAULT_CLIENT_TYPE default} authentication context. It does
+ * {@link OAuth2Client#getClientType() configured} authentication context. It does
  * not select a grant handler or issue tokens. Missing clients and invalid credentials fail the
  * current request without attempting another authenticator, and the temporary credential copy is
  * erased after validation.</p>

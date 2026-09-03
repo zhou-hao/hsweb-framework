@@ -26,7 +26,7 @@ public class CompositeClientCredentialGranterTest {
         AtomicInteger defaultCalls = new AtomicInteger();
 
         CompositeClientCredentialGranter granter = new CompositeClientCredentialGranter(Arrays.asList(
-                handler(OAuth2ClientAuthentication.DEFAULT_CLIENT_TYPE, request -> {
+                handler(OAuth2Client.DEFAULT_CLIENT_TYPE, request -> {
                     defaultCalls.incrementAndGet();
                     return Mono.error(new AssertionError("default handler must not be used"));
                 }),
@@ -47,7 +47,7 @@ public class CompositeClientCredentialGranterTest {
         AtomicInteger defaultCalls = new AtomicInteger();
 
         CompositeClientCredentialGranter granter = new CompositeClientCredentialGranter(Arrays.asList(
-                handler(OAuth2ClientAuthentication.DEFAULT_CLIENT_TYPE, request -> {
+                handler(OAuth2Client.DEFAULT_CLIENT_TYPE, request -> {
                     defaultCalls.incrementAndGet();
                     return Mono.empty();
                 }),
@@ -65,7 +65,7 @@ public class CompositeClientCredentialGranterTest {
     public void shouldRejectUnknownClientTypeAsUnauthorizedClient() {
         CompositeClientCredentialGranter granter = new CompositeClientCredentialGranter(
                 Collections.singletonList(handler(
-                        OAuth2ClientAuthentication.DEFAULT_CLIENT_TYPE,
+                        OAuth2Client.DEFAULT_CLIENT_TYPE,
                         request -> Mono.empty())));
 
         StepVerifier
