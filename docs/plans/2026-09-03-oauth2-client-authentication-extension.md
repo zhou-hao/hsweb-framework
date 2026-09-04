@@ -486,3 +486,82 @@ CI 暴露的 EasyORM 驱动与组件扫描装配问题修复后，集中执行�
 ### 交付
 
 - Pull Request：<https://github.com/hs-web/hsweb-framework/pull/367>
+
+## 14. v1.4 通用客户端认证编排
+
+### 目标与边界
+
+token endpoint 不再假设所有客户端认证方式都提供 `client_secret`。HTTP 认证证据提取与
+客户端身份验证分成两个扩展阶段：
+
+    HTTP request
+      -> ReactiveOAuth2ClientAuthenticationRequestResolver
+      -> OAuth2ClientAuthenticationRequest
+      -> ReactiveOAuth2ClientAuthenticator
+      -> ReactiveOAuth2ClientAuthenticationProvider
+      -> OAuth2ClientAuthentication
+      -> grant
+
+本阶段继续内置 `client_secret_basic`、`client_secret_post`，并允许外部模块注册请求 Converter
+和认证 Provider，以承载 JWT assertion、mTLS、AK/SK 签名或无 Secret 认证。具体 JWT、证书、
+签名、PKCE 业务实现不属于 hsweb；authorization_code、refresh_token、client_credentials、
+AccessTokenManager、OAuth2ClientManager 和 Token 存储模型不变，也不引入 Spring Security。
+
+### 冻结契约
+
+1. `OAuth2ClientAuthenticationRequest` 只保存 clientId、开放字符串 authenticationMethod、
+   grantType 和不含原始凭证的安全参数，并提供 `eraseCredentials()` 生命周期方法。具体请求
+   类型自行持有和清理认证证据；内置 `OAuth2ClientSecretAuthenticationRequest` 使用防御性
+   `char[]` 副本保存 Secret。
+2. `ReactiveOAuth2ClientAuthenticationRequestResolver` 是从 `ServerWebExchange` 和原始多值
+   参数创建标准化请求的可整体覆盖门面；默认组合 Resolver 收集按 Spring `Ordered` 排序的
+   `ReactiveOAuth2ClientAuthenticationRequestConverter` 贡献者并串行尝试，最后以内置 Secret
+   Converter 兜底。Converter 返回 `Mono.empty()` 表示不识别当前方式；已识别但格式非法必须
+   返回错误，不得回退。
+3. `ReactiveOAuth2ClientAuthenticationProvider` 声明其支持的 authenticationMethod。组合
+   authenticator 按方法精确选择唯一 Provider；两个外部 Provider 声明同一方法时启动失败；
+   Provider 失败或返回空时认证终止，绝不尝试其他 Provider。外部 Provider 可以显式覆盖
+   内置 Secret 方法。
+4. Controller 只负责 grant_type 分派和编排，不解析 Basic、不校验 Secret。凭证由请求在
+   认证 Publisher 的 complete、error、cancel 或同步异常终止时统一清理；grant 继续只接收
+   脱敏 `OAuth2Client` 和安全参数。
+5. 合法 Basic、form/query、GET/POST、Basic 优先级、现有 OAuth2 错误和三种 grant 行为保持。
+   重复 client_id/client_secret、非法 Basic 等畸形输入可以按既有错误码提前拒绝，这是安全
+   收紧，不构成新的认证方式。
+
+### 自动装配与兼容
+
+- 用户提供 `ReactiveOAuth2ClientAuthenticator` 时仍完全覆盖默认认证门面。
+- 未提供认证门面时，自动装配组合 authenticator，包含外部 Provider 和内置 Secret Provider。
+- 用户提供 `ReactiveOAuth2ClientAuthenticationRequestResolver` 时整体覆盖默认解析门面；否则
+  自动装配组合 Resolver，收集外部 Converter 并以内置 Secret Converter 兜底。
+- PR 内尚未发布的具体请求 DTO 直接收敛为最终类型化模型，不为中间形态保留适配分支；PR
+  之前已经存在的 OAuth2ClientManager、OAuth2Client、Granter 和 Controller 三参数构造方式
+  继续兼容。
+
+### 验证目标
+
+- 回归合法 Basic、form、GET/POST、authorization_code、refresh_token 和 client_credentials。
+- 验证 Converter 顺序、非法输入不回退、重复敏感参数、Provider 唯一路由、未知方式和失败不
+  回退。
+- 验证 Secret 在 complete、error、cancel 和同步异常后清理，且 grant、attributes、事件不含
+  原始凭证。
+- 使用无 Secret 的自定义 Header 请求做 HTTP 集成测试，证明扩展不需要修改 Controller；
+  不在测试中伪造完整 JWT、PKCE 或 mTLS 业务实现。
+
+### 验证结果与剩余风险
+
+- 定向认证编排与 HTTP 集成测试：30 tests，0 failures/errors/skips。
+  `mvn test -pl hsweb-authorization/hsweb-authorization-oauth2 -am -Dtest=OAuth2ServerAutoConfigurationTest,DefaultReactiveOAuth2ClientAuthenticatorTest,ClientSecretAuthenticationRequestConverterTest,CompositeReactiveOAuth2ClientAuthenticationRequestResolverTest,CompositeReactiveOAuth2ClientAuthenticatorTest,OAuth2AuthorizeControllerTest,OAuth2TokenEndpointAutoConfigurationIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false`
+- `hsweb-authorization-oauth2` owning module 全量测试：53 tests，0 failures/errors，2 skipped。
+  `mvn test -pl hsweb-authorization/hsweb-authorization-oauth2`
+- 安装当前 reactor 构件后执行 `hsweb-system-authorization-oauth2` owning module 全量测试：
+  8 tests，0 failures/errors/skips；`OAuth2ClientManagerAutoConfigurationTest` 通过，覆盖组件扫描下
+  五参数 Controller 构造器装配。
+- 从根模块使用 `-am` 执行系统模块全链路测试时，被目标模块之前的既有
+  `DefaultSwitcherTest` 阻断；该用例单独运行仍稳定失败，目标目录无本次改动。本阶段未修改
+  无关 datasource 代码，OAuth2 两个 owning module 已分别完成全量验证。
+
+### 交付
+
+- Pull Request：<https://github.com/hs-web/hsweb-framework/pull/367>

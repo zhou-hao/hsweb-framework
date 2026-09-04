@@ -6,6 +6,7 @@ import org.hswebframework.web.oauth2.server.OAuth2GrantService;
 import org.hswebframework.web.oauth2.server.OAuth2Properties;
 import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthentication;
 import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthenticationRequest;
+import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientSecretAuthenticationRequest;
 import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticator;
 import org.hswebframework.web.oauth2.server.code.AuthorizationCodeGranter;
 import org.hswebframework.web.oauth2.server.code.AuthorizationCodeRequest;
@@ -32,6 +33,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 
@@ -59,7 +61,7 @@ public class OAuth2AuthorizeControllerTest {
     public void shouldClearCredentialsOnEveryAuthenticationTermination() {
         AtomicReference<OAuth2ClientAuthenticationRequest> completedRequest = new AtomicReference<>();
         OAuth2AuthorizeController completedController = controller(request -> {
-            assertEquals("secret", new String(request.getCredentials()));
+            assertEquals("secret", new String(clientSecret(request)));
             completedRequest.set(request);
             OAuth2Client client = new OAuth2Client();
             client.setClientId(request.getClientId());
@@ -78,7 +80,7 @@ public class OAuth2AuthorizeControllerTest {
             return Mono
                 .delay(Duration.ofMillis(1))
                 .flatMap(ignore -> {
-                    assertEquals("secret", new String(request.getCredentials()));
+                    assertEquals("secret", new String(clientSecret(request)));
                     return Mono.error(asyncError);
                 });
         });
@@ -89,12 +91,13 @@ public class OAuth2AuthorizeControllerTest {
 
         AtomicReference<OAuth2ClientAuthenticationRequest> cancelledRequest = new AtomicReference<>();
         OAuth2AuthorizeController cancelledController = controller(request -> {
-            assertEquals("secret", new String(request.getCredentials()));
+            assertEquals("secret", new String(clientSecret(request)));
             cancelledRequest.set(request);
             return Mono.never();
         });
         StepVerifier
             .create(requestClientCredentialToken(cancelledController))
+            .then(() -> assertNotNull(cancelledRequest.get()))
             .thenCancel()
             .verify();
         awaitCredentialsCleared(cancelledRequest.get());
@@ -102,7 +105,7 @@ public class OAuth2AuthorizeControllerTest {
         RuntimeException syncError = new RuntimeException("synchronous authentication failed");
         AtomicReference<OAuth2ClientAuthenticationRequest> syncRequest = new AtomicReference<>();
         OAuth2AuthorizeController syncController = controller(request -> {
-            assertEquals("secret", new String(request.getCredentials()));
+            assertEquals("secret", new String(clientSecret(request)));
             syncRequest.set(request);
             throw syncError;
         });
@@ -222,11 +225,11 @@ public class OAuth2AuthorizeControllerTest {
     }
 
     private void awaitCredentialsCleared(OAuth2ClientAuthenticationRequest request) {
-        long timeout = System.nanoTime() + Duration.ofSeconds(1).toNanos();
-        while (request.getCredentials() != null && System.nanoTime() < timeout) {
-            Thread.yield();
-        }
-        assertNull(request.getCredentials());
+        assertNull(((OAuth2ClientSecretAuthenticationRequest) request).getClientSecret());
+    }
+
+    private char[] clientSecret(OAuth2ClientAuthenticationRequest request) {
+        return ((OAuth2ClientSecretAuthenticationRequest) request).getClientSecret();
     }
 
     private ServerWebExchange exchange(MultiValueMap<String, String> query) {

@@ -9,9 +9,12 @@ import org.hswebframework.web.oauth2.server.OAuth2Client;
 import org.hswebframework.web.oauth2.server.OAuth2ClientManager;
 import org.hswebframework.web.oauth2.server.OAuth2GrantService;
 import org.hswebframework.web.oauth2.server.OAuth2ServerAutoConfiguration;
-import org.hswebframework.web.oauth2.server.authentication.DefaultReactiveOAuth2ClientAuthenticator;
+import org.hswebframework.web.oauth2.server.authentication.CompositeReactiveOAuth2ClientAuthenticator;
 import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthentication;
 import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthenticationRequest;
+import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientSecretAuthenticationRequest;
+import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticationProvider;
+import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticationRequestConverter;
 import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticator;
 import org.hswebframework.web.oauth2.server.code.AuthorizationCodeGranter;
 import org.hswebframework.web.oauth2.server.code.AuthorizationCodeRequest;
@@ -37,6 +40,8 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -81,7 +86,7 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
             context.refresh();
 
             assertTrue(context.getBean(ReactiveOAuth2ClientAuthenticator.class)
-                              instanceof DefaultReactiveOAuth2ClientAuthenticator);
+                              instanceof CompositeReactiveOAuth2ClientAuthenticator);
             assertSame(legacyGranter, context.getBean(ClientCredentialGranter.class));
             assertNotNull(context.getBean(OAuth2GrantService.class));
             assertNotNull(context.getBean(OAuth2AuthorizeController.class));
@@ -130,7 +135,7 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
             assertEquals("api-client", request.getClientId());
             assertEquals(OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
                          request.getAuthenticationMethod());
-            assertArrayEquals("api-secret".toCharArray(), request.getCredentials());
+            assertArrayEquals("api-secret".toCharArray(), clientSecret(request));
             assertFalse(request.getParameters().containsKey("client_secret"));
 
             OAuth2Client source = client("api-client", "stored-secret-must-not-pass");
@@ -177,7 +182,7 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
 
             assertEquals(1, authenticatorCalls.get());
             assertEquals(1, handlerCalls.get());
-            assertNull(authenticationRequest.get().getCredentials());
+            assertNull(clientSecret(authenticationRequest.get()));
             assertFalse(grantRequest.get().getParameters().containsKey("client_secret"));
             assertNull(grantRequest.get().getClient().getClientSecret());
             assertFalse(grantRequest.get()
@@ -215,7 +220,7 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
             context.refresh();
 
             assertTrue(context.getBean(ReactiveOAuth2ClientAuthenticator.class)
-                              instanceof DefaultReactiveOAuth2ClientAuthenticator);
+                              instanceof CompositeReactiveOAuth2ClientAuthenticator);
             assertTrue(context.getBean(ClientCredentialGranter.class)
                               instanceof CompositeClientCredentialGranter);
 
@@ -314,6 +319,108 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
 
             assertEquals(1, authenticatorCalls.get());
             assertEquals(0, apiHandlerCalls.get());
+            assertEquals(0, accessTokenManager.createCalls.get());
+        }
+    }
+
+    @Test
+    public void shouldAuthenticateCustomHeaderWithoutClientSecret() {
+        AtomicInteger converterCalls = new AtomicInteger();
+        AtomicInteger providerCalls = new AtomicInteger();
+        AtomicReference<SignatureAuthenticationRequest> authenticationRequest = new AtomicReference<>();
+        AtomicReference<ClientCredentialRequest> grantRequest = new AtomicReference<>();
+        RecordingAccessTokenManager accessTokenManager = new RecordingAccessTokenManager();
+        ReactiveOAuth2ClientAuthenticationRequestConverter converter =
+            (exchange, parameters, grantType) -> {
+                String signature = exchange.getRequest().getHeaders().getFirst("X-Client-Signature");
+                if (signature == null) {
+                    return Mono.empty();
+                }
+                converterCalls.incrementAndGet();
+                SignatureAuthenticationRequest request = new SignatureAuthenticationRequest(
+                    parameters.getFirst("client_id"),
+                    grantType,
+                    signature.toCharArray(),
+                    new HashMap<>(parameters.toSingleValueMap()));
+                authenticationRequest.set(request);
+                return Mono.just(request);
+            };
+        ReactiveOAuth2ClientAuthenticationProvider provider =
+            new ReactiveOAuth2ClientAuthenticationProvider() {
+                @Override
+                public Collection<String> getAuthenticationMethods() {
+                    return Collections.singleton("api_signature");
+                }
+
+                @Override
+                public Mono<OAuth2ClientAuthentication> authenticate(
+                    OAuth2ClientAuthenticationRequest request) {
+                    providerCalls.incrementAndGet();
+                    SignatureAuthenticationRequest signatureRequest =
+                        (SignatureAuthenticationRequest) request;
+                    char[] signature = signatureRequest.getSignature();
+                    try {
+                        assertArrayEquals("signed-request".toCharArray(), signature);
+                    } finally {
+                        Arrays.fill(signature, '\0');
+                    }
+                    OAuth2Client client = client(request.getClientId(), null);
+                    return Mono.just(new OAuth2ClientAuthentication(
+                        client,
+                        "api",
+                        Collections.singletonMap("credential_id", "signature-1")));
+                }
+            };
+        ClientCredentialGrantHandler handler = handler("api", request -> {
+            grantRequest.set(request);
+            return Mono.just(new AccessToken("signed-token", null, 30));
+        });
+
+        try (AnnotationConfigReactiveWebApplicationContext context = baseContext(accessTokenManager)) {
+            context.registerBean(
+                "oAuth2ClientManager",
+                OAuth2ClientManager.class,
+                () -> clientId -> Mono.error(new AssertionError("default provider must not be used")));
+            context.registerBean(
+                "apiSignatureRequestConverter",
+                ReactiveOAuth2ClientAuthenticationRequestConverter.class,
+                () -> converter);
+            context.registerBean(
+                "apiSignatureAuthenticationProvider",
+                ReactiveOAuth2ClientAuthenticationProvider.class,
+                () -> provider);
+            context.registerBean(
+                "apiClientCredentialGrantHandler",
+                ClientCredentialGrantHandler.class,
+                () -> handler);
+            context.refresh();
+
+            webClient(context)
+                .post()
+                .uri("/oauth2/token")
+                .header("X-Client-Signature", "signed-request")
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .body(BodyInserters
+                          .fromFormData("grant_type", "client_credentials")
+                          .with("client_id", "signed-client"))
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .consumeWith(result -> {
+                    assertNotNull(result.getResponseBody());
+                    String body = new String(result.getResponseBody(), StandardCharsets.UTF_8);
+                    assertTrue(body.contains("signed-token"));
+                    assertFalse(body.contains("signed-request"));
+                });
+
+            assertEquals(1, converterCalls.get());
+            assertEquals(1, providerCalls.get());
+            assertNull(authenticationRequest.get().getSignature());
+            assertEquals("signed-client", grantRequest.get().getClient().getClientId());
+            assertNull(grantRequest.get().getClient().getClientSecret());
+            assertFalse(grantRequest.get().getParameters().containsKey("client_secret"));
+            assertEquals("signature-1",
+                         grantRequest.get().getClientAuthentication().getAttributes().get("credential_id"));
             assertEquals(0, accessTokenManager.createCalls.get());
         }
     }
@@ -437,6 +544,10 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
         return client;
     }
 
+    private static char[] clientSecret(OAuth2ClientAuthenticationRequest request) {
+        return ((OAuth2ClientSecretAuthenticationRequest) request).getClientSecret();
+    }
+
     private static ClientCredentialGrantHandler handler(
         String clientType,
         java.util.function.Function<ClientCredentialRequest, Mono<AccessToken>> issuer) {
@@ -451,6 +562,32 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
                 return issuer.apply(request);
             }
         };
+    }
+
+    private static final class SignatureAuthenticationRequest
+        extends OAuth2ClientAuthenticationRequest {
+
+        private char[] signature;
+
+        private SignatureAuthenticationRequest(String clientId,
+                                               String grantType,
+                                               char[] signature,
+                                               Map<String, String> parameters) {
+            super(clientId, "api_signature", grantType, parameters);
+            this.signature = signature.clone();
+        }
+
+        private synchronized char[] getSignature() {
+            return signature == null ? null : signature.clone();
+        }
+
+        @Override
+        public synchronized void eraseCredentials() {
+            if (signature != null) {
+                Arrays.fill(signature, '\0');
+                signature = null;
+            }
+        }
     }
 
     @Configuration(proxyBeanMethods = false)

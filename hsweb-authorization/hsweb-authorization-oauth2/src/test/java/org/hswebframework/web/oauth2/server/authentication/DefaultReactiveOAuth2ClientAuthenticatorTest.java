@@ -10,7 +10,6 @@ import reactor.test.StepVerifier;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.*;
 
@@ -48,7 +47,7 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
         Map<String, String> untrustedParameters = new HashMap<>();
         untrustedParameters.put("client_type", "untrusted");
         untrustedParameters.put("clientType", "untrusted");
-        OAuth2ClientAuthenticationRequest request = new OAuth2ClientAuthenticationRequest(
+        OAuth2ClientAuthenticationRequest request = new OAuth2ClientSecretAuthenticationRequest(
             "test",
             OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
             "secret".toCharArray(),
@@ -100,7 +99,7 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
         OAuth2Client client = client("test", "secret");
         DefaultReactiveOAuth2ClientAuthenticator authenticator =
             new DefaultReactiveOAuth2ClientAuthenticator(id -> Mono.just(client));
-        OAuth2ClientAuthenticationRequest request = new OAuth2ClientAuthenticationRequest(
+        OAuth2ClientAuthenticationRequest request = new OAuth2ClientSecretAuthenticationRequest(
             "test",
             OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
             null,
@@ -116,41 +115,13 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
     }
 
     @Test
-    public void shouldClearCredentialCopyAfterLegacyValidation() {
-        OAuth2Client client = client("test", "secret");
-        AtomicReference<char[]> credentialCopy = new AtomicReference<>();
-        OAuth2ClientAuthenticationRequest request = new OAuth2ClientAuthenticationRequest(
-            "test",
-            OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
-            "secret".toCharArray(),
-            "client_credentials",
-            Collections.emptyMap()) {
-            @Override
-            public synchronized char[] getCredentials() {
-                char[] credentials = super.getCredentials();
-                credentialCopy.set(credentials);
-                return credentials;
-            }
-        };
-
-        new DefaultReactiveOAuth2ClientAuthenticator(id -> Mono.just(client))
-            .authenticate(request)
-            .as(StepVerifier::create)
-            .expectNextCount(1)
-            .verifyComplete();
-
-        assertArrayEquals(new char["secret".length()], credentialCopy.get());
-        assertArrayEquals("secret".toCharArray(), request.getCredentials());
-    }
-
-    @Test
     public void shouldProtectCredentialsAndAuthenticationContext() {
         char[] credentials = "secret".toCharArray();
         Map<String, String> parameters = new HashMap<>();
         parameters.put("client_secret", "secret");
         parameters.put("scope", "read");
 
-        OAuth2ClientAuthenticationRequest request = new OAuth2ClientAuthenticationRequest(
+        OAuth2ClientSecretAuthenticationRequest request = new OAuth2ClientSecretAuthenticationRequest(
             "test",
             OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
             credentials,
@@ -159,10 +130,10 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
 
         credentials[0] = 'X';
         parameters.put("scope", "write");
-        char[] exposed = request.getCredentials();
+        char[] exposed = request.getClientSecret();
         exposed[0] = 'Y';
 
-        assertArrayEquals("secret".toCharArray(), request.getCredentials());
+        assertArrayEquals("secret".toCharArray(), request.getClientSecret());
         assertEquals("read", request.getParameters().get("scope"));
         assertFalse(request.getParameters().containsKey("client_secret"));
         assertFalse(request.toString().contains("secret"));
@@ -172,8 +143,8 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
         } catch (UnsupportedOperationException ignore) {
             // expected
         }
-        request.clearCredentials();
-        assertNull(request.getCredentials());
+        request.eraseCredentials();
+        assertNull(request.getClientSecret());
 
         Map<String, Object> attributes = new HashMap<>();
         attributes.put("credentialId", "credential-1");
@@ -211,7 +182,7 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
     }
 
     private OAuth2ClientAuthenticationRequest request(String clientId, String secret) {
-        return new OAuth2ClientAuthenticationRequest(
+        return new OAuth2ClientSecretAuthenticationRequest(
             clientId,
             OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
             secret.toCharArray(),

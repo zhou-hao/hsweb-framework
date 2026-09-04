@@ -2,25 +2,23 @@ package org.hswebframework.web.oauth2.server.authentication;
 
 import lombok.Getter;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Per-attempt input for OAuth2 client authentication at the token endpoint.
+ * Normalized input for one OAuth2 client authentication attempt.
  *
- * <p>Credentials are defensively copied on input and access. Parameters are copied into an
- * immutable map with {@code client_secret} removed. The controller clears the internal credential
- * copy when authentication terminates; authenticators must not retain the request or any returned
- * credential copy beyond the asynchronous authentication operation.</p>
+ * <p>The request contains transport-neutral metadata and a safe parameter view. Concrete request
+ * types own their authentication evidence and erase sensitive state when authentication terminates.
+ * Implementations must not retain the request beyond the asynchronous authentication operation.</p>
  *
  * @author zhouhao
  * @since 5.0.2
  * @see ReactiveOAuth2ClientAuthenticator
  */
 @Getter
-public class OAuth2ClientAuthenticationRequest {
+public abstract class OAuth2ClientAuthenticationRequest {
 
     public static final String CLIENT_SECRET_BASIC = "client_secret_basic";
 
@@ -29,8 +27,6 @@ public class OAuth2ClientAuthenticationRequest {
     private final String clientId;
 
     private final String authenticationMethod;
-
-    private char[] credentials;
 
     private final String grantType;
 
@@ -41,45 +37,27 @@ public class OAuth2ClientAuthenticationRequest {
      *
      * @param clientId client identifier extracted by the token endpoint
      * @param authenticationMethod authentication mechanism used to obtain the credentials
-     * @param credentials credentials to copy for this attempt, or {@code null}
      * @param grantType requested OAuth2 grant type
-     * @param parameters request parameters; copied and stripped of {@code client_secret}
+     * @param parameters request parameters after credential fields have been removed
      */
-    public OAuth2ClientAuthenticationRequest(String clientId,
-                                             String authenticationMethod,
-                                             char[] credentials,
-                                             String grantType,
-                                             Map<String, String> parameters) {
+    protected OAuth2ClientAuthenticationRequest(String clientId,
+                                                String authenticationMethod,
+                                                String grantType,
+                                                Map<String, String> parameters) {
         this.clientId = clientId;
         this.authenticationMethod = authenticationMethod;
-        this.credentials = credentials == null ? null : credentials.clone();
         this.grantType = grantType;
         this.parameters = safeParameters(parameters);
     }
 
     /**
-     * Obtain a defensive copy of the credentials for immediate verification.
+     * Erase credentials owned by this request.
      *
-     * <p>The caller owns the returned array and should erase it after use. The request's internal
-     * credential state remains available until {@link #clearCredentials()} is invoked.</p>
-     *
-     * @return credential copy, or {@code null} after cleanup or when no credentials were supplied
+     * <p>The token endpoint invokes this method when the authentication publisher completes,
+     * fails, is cancelled, or throws synchronously. Implementations must make it idempotent and
+     * non-throwing, and clear every sensitive copy they own.</p>
      */
-    public synchronized char[] getCredentials() {
-        return credentials == null ? null : credentials.clone();
-    }
-
-    /**
-     * Erase and release the credentials held by this request.
-     *
-     * <p>This lifecycle operation is idempotent and is normally invoked by the token endpoint when
-     * authentication completes, fails, or is cancelled.</p>
-     */
-    public synchronized void clearCredentials() {
-        if (credentials != null) {
-            Arrays.fill(credentials, '\0');
-            credentials = null;
-        }
+    public void eraseCredentials() {
     }
 
     private static Map<String, String> safeParameters(Map<String, String> parameters) {

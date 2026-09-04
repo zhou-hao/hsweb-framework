@@ -1,7 +1,13 @@
 package org.hswebframework.web.oauth2.server;
 
 import org.hswebframework.web.authorization.token.UserTokenManager;
-import org.hswebframework.web.oauth2.server.authentication.DefaultReactiveOAuth2ClientAuthenticator;
+import org.hswebframework.web.oauth2.server.authentication.ClientSecretAuthenticationRequestConverter;
+import org.hswebframework.web.oauth2.server.authentication.CompositeReactiveOAuth2ClientAuthenticationRequestResolver;
+import org.hswebframework.web.oauth2.server.authentication.CompositeReactiveOAuth2ClientAuthenticator;
+import org.hswebframework.web.oauth2.server.authentication.DefaultOAuth2ClientSecretAuthenticationProvider;
+import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticationProvider;
+import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticationRequestConverter;
+import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticationRequestResolver;
 import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticator;
 import org.hswebframework.web.oauth2.server.code.AuthorizationCodeGranter;
 import org.hswebframework.web.oauth2.server.code.DefaultAuthorizationCodeGranter;
@@ -69,8 +75,25 @@ public class OAuth2ServerAutoConfiguration {
         @Bean
         @ConditionalOnMissingBean
         @ConditionalOnBean(OAuth2ClientManager.class)
-        public ReactiveOAuth2ClientAuthenticator reactiveOAuth2ClientAuthenticator(OAuth2ClientManager clientManager) {
-            return new DefaultReactiveOAuth2ClientAuthenticator(clientManager);
+        public ReactiveOAuth2ClientAuthenticator reactiveOAuth2ClientAuthenticator(
+                OAuth2ClientManager clientManager,
+                ObjectProvider<ReactiveOAuth2ClientAuthenticationProvider> providerProvider) {
+            List<ReactiveOAuth2ClientAuthenticationProvider> providers = new ArrayList<>();
+            providerProvider.orderedStream().forEach(providers::add);
+            return new CompositeReactiveOAuth2ClientAuthenticator(
+                    providers,
+                    new DefaultOAuth2ClientSecretAuthenticationProvider(clientManager));
+        }
+
+        @Bean
+        @ConditionalOnMissingBean
+        public ReactiveOAuth2ClientAuthenticationRequestResolver oauth2ClientAuthenticationRequestResolver(
+                ObjectProvider<ReactiveOAuth2ClientAuthenticationRequestConverter> converterProvider) {
+            List<ReactiveOAuth2ClientAuthenticationRequestConverter> converters = new ArrayList<>();
+            converterProvider.orderedStream().forEach(converters::add);
+            return new CompositeReactiveOAuth2ClientAuthenticationRequestResolver(
+                    converters,
+                    new ClientSecretAuthenticationRequestConverter());
         }
 
         @Bean
@@ -107,11 +130,13 @@ public class OAuth2ServerAutoConfiguration {
                 OAuth2GrantService grantService,
                 OAuth2ClientManager clientManager,
                 OAuth2Properties properties,
-                ReactiveOAuth2ClientAuthenticator clientAuthenticator) {
+                ReactiveOAuth2ClientAuthenticator clientAuthenticator,
+                ReactiveOAuth2ClientAuthenticationRequestResolver requestResolver) {
             return new OAuth2AuthorizeController(grantService,
                                                  clientManager,
                                                  properties,
-                                                 clientAuthenticator);
+                                                 clientAuthenticator,
+                                                 requestResolver);
         }
 
     }

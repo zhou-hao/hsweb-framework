@@ -4,7 +4,7 @@ import org.hswebframework.web.authorization.Authentication;
 import org.hswebframework.web.authorization.AuthenticationRequest;
 import org.hswebframework.web.authorization.ReactiveAuthenticationManager;
 import org.hswebframework.web.authorization.simple.SimpleAuthentication;
-import org.hswebframework.web.oauth2.server.authentication.DefaultReactiveOAuth2ClientAuthenticator;
+import org.hswebframework.web.oauth2.server.authentication.CompositeReactiveOAuth2ClientAuthenticator;
 import org.hswebframework.web.oauth2.server.authentication.OAuth2ClientAuthentication;
 import org.hswebframework.web.oauth2.server.authentication.ReactiveOAuth2ClientAuthenticator;
 import org.hswebframework.web.oauth2.server.code.AuthorizationCodeGranter;
@@ -107,7 +107,7 @@ public class OAuth2ServerAutoConfigurationTest {
 
             ReactiveOAuth2ClientAuthenticator authenticator =
                     context.getBean(ReactiveOAuth2ClientAuthenticator.class);
-            assertTrue(authenticator instanceof DefaultReactiveOAuth2ClientAuthenticator);
+            assertTrue(authenticator instanceof CompositeReactiveOAuth2ClientAuthenticator);
             assertSame(context.getBean(OAuth2AuthorizeController.class),
                        context.getBean("oAuth2AuthorizeController"));
         }
