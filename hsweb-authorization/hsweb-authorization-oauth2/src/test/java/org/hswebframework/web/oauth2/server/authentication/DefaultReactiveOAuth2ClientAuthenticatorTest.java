@@ -33,6 +33,8 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
                              authentication.getClientType());
                 assertEquals(OAuth2Client.DEFAULT_CLIENT_TYPE,
                              authentication.getClient().getClientType());
+                assertEquals(OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
+                             authentication.getAuthenticationMethod());
                 assertTrue(authentication.getAttributes().isEmpty());
             })
             .verifyComplete();
@@ -63,6 +65,8 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
                 assertNotSame(client, authentication.getClient());
                 assertNull(authentication.getClient().getClientSecret());
                 assertEquals("secret", client.getClientSecret());
+                assertEquals(OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
+                             authentication.getAuthenticationMethod());
             })
             .verifyComplete();
     }
@@ -168,6 +172,7 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
         assertEquals("secret", client.getClientSecret());
         assertEquals("api", authentication.getClientType());
         assertEquals("api", authentication.getClient().getClientType());
+        assertNull(authentication.getAuthenticationMethod());
         assertEquals("credential-1", authentication.getAttributes().get("credentialId"));
         assertFalse(authentication.getAttributes().containsKey("client_secret"));
         try {
@@ -179,6 +184,7 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
 
         assertInvalidClientType(client, null);
         assertInvalidClientType(client, " ");
+        assertInvalidAuthenticationMethod(client, " ");
     }
 
     private OAuth2ClientAuthenticationRequest request(String clientId, String secret) {
@@ -201,6 +207,19 @@ public class DefaultReactiveOAuth2ClientAuthenticatorTest {
         try {
             new OAuth2ClientAuthentication(client, clientType, Collections.emptyMap());
             fail("clientType must be rejected");
+        } catch (IllegalArgumentException ignore) {
+            // expected
+        }
+    }
+
+    private void assertInvalidAuthenticationMethod(OAuth2Client client, String authenticationMethod) {
+        try {
+            new OAuth2ClientAuthentication(
+                client,
+                "api",
+                authenticationMethod,
+                Collections.emptyMap());
+            fail("blank authenticationMethod must be rejected");
         } catch (IllegalArgumentException ignore) {
             // expected
         }

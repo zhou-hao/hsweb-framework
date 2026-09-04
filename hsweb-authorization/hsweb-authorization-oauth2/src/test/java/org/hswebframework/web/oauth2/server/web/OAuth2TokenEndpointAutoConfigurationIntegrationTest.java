@@ -110,11 +110,15 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
                     assertNotNull(result.getResponseBody());
                     String body = new String(result.getResponseBody(), StandardCharsets.UTF_8);
                     assertTrue(body.contains("legacy-token"));
+                    assertTrue(body.contains("\"token_type\":\"Bearer\""));
+                    assertFalse(body.contains("\"scope\""));
                     assertFalse(body.contains("ignored-form-secret"));
                 });
 
             assertEquals(1, legacyCalls.get());
             assertEquals("legacy-client", grantRequest.get().getClient().getClientId());
+            assertEquals(OAuth2ClientAuthenticationRequest.CLIENT_SECRET_BASIC,
+                         grantRequest.get().getClientAuthentication().getAuthenticationMethod());
             assertNull(grantRequest.get().getClient().getClientSecret());
             assertFalse(grantRequest.get().getParameters().containsKey("client_secret"));
             assertEquals(0, accessTokenManager.createCalls.get());
@@ -142,12 +146,16 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
             Map<String, Object> attributes = new HashMap<>();
             attributes.put("credential_id", "credential-1");
             attributes.put("client_secret", "attribute-secret-must-not-pass");
-            return Mono.just(new OAuth2ClientAuthentication(source, "api", attributes));
+            return Mono.just(new OAuth2ClientAuthentication(
+                source,
+                "api",
+                request.getAuthenticationMethod(),
+                attributes));
         };
         ClientCredentialGrantHandler handler = handler("api", request -> {
             handlerCalls.incrementAndGet();
             grantRequest.set(request);
-            return Mono.just(new AccessToken("api-token", null, 30));
+            return Mono.just(new AccessToken("api-token", null, 30, "Bearer", "read write"));
         });
 
         try (AnnotationConfigReactiveWebApplicationContext context =
@@ -175,6 +183,8 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
                     assertNotNull(result.getResponseBody());
                     String body = new String(result.getResponseBody(), StandardCharsets.UTF_8);
                     assertTrue(body.contains("api-token"));
+                    assertTrue(body.contains("\"token_type\":\"Bearer\""));
+                    assertTrue(body.contains("\"scope\":\"read write\""));
                     assertFalse(body.contains("api-secret"));
                     assertFalse(body.contains("stored-secret-must-not-pass"));
                     assertFalse(body.contains("attribute-secret-must-not-pass"));
@@ -189,6 +199,8 @@ public class OAuth2TokenEndpointAutoConfigurationIntegrationTest {
                                     .getClientAuthentication()
                                     .getAttributes()
                                     .containsKey("client_secret"));
+            assertEquals(OAuth2ClientAuthenticationRequest.CLIENT_SECRET_POST,
+                         grantRequest.get().getClientAuthentication().getAuthenticationMethod());
             assertEquals("credential-1",
                          grantRequest.get().getClientAuthentication().getAttributes().get("credential_id"));
             assertEquals(0, accessTokenManager.createCalls.get());

@@ -12,9 +12,10 @@ import java.util.Objects;
 /**
  * Successfully authenticated OAuth2 client context passed to grant processing.
  *
- * <p>The context creates a defensive client projection without {@code clientSecret}. Attributes
- * are copied into an immutable map and {@code client_secret} is removed. Authenticators should add
- * only the minimum non-secret metadata required by the selected grant handler.</p>
+ * <p>The context creates a defensive client projection without {@code clientSecret}, retains the
+ * verified client authentication method when available, and copies attributes into an immutable
+ * map with {@code client_secret} removed. Authenticators should add only the minimum non-secret
+ * metadata required by the selected grant handler.</p>
  *
  * @author zhouhao
  * @since 5.0.2
@@ -28,6 +29,8 @@ public class OAuth2ClientAuthentication {
 
     private final String clientType;
 
+    private final String authenticationMethod;
+
     private final Map<String, Object> attributes;
 
     /**
@@ -38,6 +41,7 @@ public class OAuth2ClientAuthentication {
     public OAuth2ClientAuthentication(OAuth2Client client) {
         this(client,
              Objects.requireNonNull(client, "client must not be null").getClientType(),
+             null,
              Collections.emptyMap());
     }
 
@@ -52,11 +56,32 @@ public class OAuth2ClientAuthentication {
     public OAuth2ClientAuthentication(OAuth2Client client,
                                       String clientType,
                                       Map<String, Object> attributes) {
+        this(client, clientType, null, attributes);
+    }
+
+    /**
+     * Create an authenticated client context with the verified authentication method.
+     *
+     * @param client authenticated source client; copied into a secret-free projection
+     * @param clientType stable, non-empty type used for exact grant-handler routing
+     * @param authenticationMethod verified OAuth2 client authentication method, or {@code null}
+     *                             for legacy programmatic callers without method information
+     * @param attributes optional authentication metadata; defensively copied, made immutable, and
+     *                   stripped of {@code client_secret}
+     */
+    public OAuth2ClientAuthentication(OAuth2Client client,
+                                      String clientType,
+                                      String authenticationMethod,
+                                      Map<String, Object> attributes) {
         OAuth2Client source = Objects.requireNonNull(client, "client must not be null");
         if (!StringUtils.hasText(clientType)) {
             throw new IllegalArgumentException("clientType must not be empty");
         }
+        if (authenticationMethod != null && !StringUtils.hasText(authenticationMethod)) {
+            throw new IllegalArgumentException("authenticationMethod must not be blank");
+        }
         this.clientType = clientType;
+        this.authenticationMethod = authenticationMethod;
         this.client = createClientView(source, clientType);
         if (attributes == null || attributes.isEmpty()) {
             this.attributes = Collections.emptyMap();

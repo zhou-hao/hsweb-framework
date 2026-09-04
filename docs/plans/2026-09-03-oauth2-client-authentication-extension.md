@@ -1,8 +1,8 @@
 # OAuth2 客户端认证与 client_credentials 扩展设计
 
-> 状态：oauth2-extension-v1.1 已实现并验证（含 HTTP 集成测试与清理）
+> 状态：oauth2-extension-v1.5 已实现并验证（含 HTTP 集成测试与兼容检查）
 >
-> 契约版本：oauth2-extension-v1.1
+> 契约版本：oauth2-extension-v1.5
 >
 > owning module：hsweb-authorization/hsweb-authorization-oauth2
 
@@ -565,3 +565,65 @@ AccessTokenManager、OAuth2ClientManager 和 Token 存储模型不变，也不�
 ### 交付
 
 - Pull Request：<https://github.com/hs-web/hsweb-framework/pull/367>
+
+## 15. v1.5 Token 响应与认证结果标准化
+
+### 目标与影响范围
+
+在不改变既有 OAuth2 grant、Token 存储和端点编排的前提下，补齐两项通用协议语义：
+
+1. `AccessToken` 显式返回标准 `token_type` 和可选 `scope`；
+2. `OAuth2ClientAuthentication` 显式保留本次认证使用的 `authenticationMethod`，使同一
+   clientType 下的 Secret、JWT assertion、mTLS 等认证方式可以被 grant policy 和审计可靠区分。
+
+影响范围仅限 `hsweb-authorization-oauth2` 的响应 DTO、客户端认证结果、默认 Secret Provider
+及对应单元/HTTP 集成测试。不修改 `AccessTokenManager`、Redis 数据结构、
+`OAuth2GrantService`、Controller grant 枚举或 JetLinks 业务模型。
+
+### 兼容边界
+
+- 保留 `AccessToken()` 和已发布的 `AccessToken(String accessToken, String refreshToken,
+  int expiresIn)`；旧构造方式新增默认 `token_type=Bearer`，不要求调用方迁移。
+- `scope` 使用 OAuth2 标准的空格分隔字符串；未设置时不输出该字段，不从 hsweb
+  `Authentication` 或请求参数隐式推导。
+- 保留 `OAuth2ClientAuthentication(OAuth2Client)` 和
+  `OAuth2ClientAuthentication(OAuth2Client, String, Map)`；新增包含
+  `authenticationMethod` 的构造器。旧程序化调用的 method 允许为空，避免伪造认证事实。
+- 默认 Secret Provider 从已验证的 `OAuth2ClientAuthenticationRequest` 传播 method；自定义
+  Provider 应使用新构造器返回自己的开放方法标识。
+- `credentialRef`、授权版本等仍属于安全 attributes，不提升为 hsweb 持久化字段。
+- `OAuth2Response.parameters` 本阶段不改变序列化形态；错误响应标准化和通用 grant handler
+  registry 会改变更大的端点契约，留待独立设计和验证。
+
+### 实施步骤与验证
+
+1. 调整 `AccessToken` 构造器、字段和序列化注解，并补 DTO 序列化测试。
+2. 调整 `OAuth2ClientAuthentication` 构造器与契约，由默认 Secret Provider 传播 method。
+3. 扩充认证 Provider、Controller 和 HTTP 集成测试，覆盖 Basic/Post method 传播、旧构造器
+   兼容、Token 默认类型及 scope 输出。
+4. 阶段完成后统一执行 `hsweb-authorization-oauth2` 定向测试和 owning module 全量测试，再将
+   结果回填本节。
+
+风险：新增 `token_type` 是成功响应的兼容性增量；极少数对 JSON 字段集合做严格相等判断的
+客户端需要调整。`scope` 仅在显式设置时输出，避免改变现有响应。未新增缓存、队列、异步边界
+或用户可见错误，因此不需要 TraceHolder、MBean 和 i18n 资源。
+
+### 实现与验证结果
+
+- `AccessToken` 保留 no-arg 和三参数构造器，新增五参数构造器；默认及空白
+  `tokenType` 均归一为 `Bearer`，`scope` 为空时不参与 JSON 序列化。
+- `OAuth2ClientAuthentication` 保留两个既有构造器，新增包含认证方法的构造器；默认 Secret
+  Provider 从已完成方法路由的请求传播 `client_secret_basic` 或 `client_secret_post`。
+- HTTP 集成测试验证旧 GET Basic 和 POST form/custom provider 均返回顶层 `token_type`，仅显式
+  scope 返回顶层 `scope`，同时保留 Secret 脱敏与 clientType 精确路由。
+- 定向验证：15 tests，0 failures/errors/skips。
+  `mvn test -pl hsweb-authorization/hsweb-authorization-oauth2 -am -Dtest=AccessTokenTest,DefaultReactiveOAuth2ClientAuthenticatorTest,OAuth2TokenEndpointAutoConfigurationIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false`
+- owning module 全量验证：55 tests，0 failures/errors，2 skipped。
+  `mvn test -pl hsweb-authorization/hsweb-authorization-oauth2`
+- 收紧 HTTP 断言后的最终复验：9 tests，0 failures/errors/skips。
+  `mvn test -pl hsweb-authorization/hsweb-authorization-oauth2 -Dtest=AccessTokenTest,OAuth2TokenEndpointAutoConfigurationIntegrationTest`
+- `javap -public` 确认 `AccessToken(String,String,int)`、`AccessToken()` 以及
+  `OAuth2ClientAuthentication` 两个既有构造器 descriptor 均保留；`git diff --check` 通过。
+- 未新增生产或测试依赖。尝试使用 `WebTestClient.jsonPath` 时确认当前模块未引入 Jayway
+  JsonPath，已改回直接验证真实 HTTP JSON 字节，不为两项字段断言扩大依赖。
+- Commit：本次提交；Pull Request：<https://github.com/hs-web/hsweb-framework/pull/367>。

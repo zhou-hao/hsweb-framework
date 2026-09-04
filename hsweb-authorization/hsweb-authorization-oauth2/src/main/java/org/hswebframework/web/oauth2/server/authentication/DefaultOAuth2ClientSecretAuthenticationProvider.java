@@ -9,6 +9,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 
 /**
  * Default provider for {@code client_secret_basic} and {@code client_secret_post}.
@@ -57,7 +58,11 @@ public class DefaultOAuth2ClientSecretAuthenticationProvider
                     .switchIfEmpty(Mono.error(() -> new OAuth2Exception(ErrorType.ILLEGAL_CLIENT_ID)))
                     .map(client -> {
                         client.validateSecret(new String(secret));
-                        return new OAuth2ClientAuthentication(client);
+                        return new OAuth2ClientAuthentication(
+                            client,
+                            client.getClientType(),
+                            request.getAuthenticationMethod(),
+                            Collections.emptyMap());
                     }),
                 secret -> Arrays.fill(secret, '\0'));
         });
